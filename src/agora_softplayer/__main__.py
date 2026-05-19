@@ -68,6 +68,15 @@ def _default_data_dir() -> Path:
     help="Port for the local FastAPI shell server.",
 )
 @click.option(
+    "--available-slots",
+    envvar="AGORA_SOFTPLAYER_AVAILABLE_SLOTS",
+    type=click.IntRange(1, 2),
+    default=1,
+    show_default=True,
+    help="Lie about hardware: how many HDMI ports to advertise. "
+    "Use 2 to exercise PR 2a's slot-B reconciliation path against a CMS.",
+)
+@click.option(
     "-v", "--verbose", is_flag=True, help="Enable debug logging."
 )
 def main(
@@ -75,6 +84,7 @@ def main(
     data_dir: Path | None,
     browser_path: Path | None,
     shell_port: int,
+    available_slots: int,
     verbose: bool,
 ) -> None:
     """Run the agora softplayer."""
@@ -87,6 +97,19 @@ def main(
     data_dir = (data_dir or _default_data_dir()).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
     logger.info("agora-softplayer %s starting (data_dir=%s)", __version__, data_dir)
+
+    # Install the agora shims so any subsequent cms_client / shared.*
+    # import resolves to Windows-friendly stand-ins. Cheap and idempotent;
+    # we do it even in M1-standalone mode so the shim state (data_dir,
+    # available_slots) is always in sync with the CLI flags.
+    from agora_softplayer import shims
+    shims.configure(data_dir=data_dir, available_slots=available_slots)
+    try:
+        shims.apply_shims()
+    except ModuleNotFoundError as exc:
+        # Bare scaffold without the agora/ submodule checked out is fine
+        # for M1; we only need shims when we wire CMSClient.
+        logger.warning("agora submodule unavailable, shims not installed: %s", exc)
 
     if cms_url:
         logger.info("CMS URL configured: %s (M2: not yet wired)", cms_url)
