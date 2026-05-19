@@ -131,7 +131,13 @@ def main(
     logger.info("Using browser: %s", browser)
 
     shell_url = f"http://127.0.0.1:{shell_port}/"
-    server = ShellServer(host="127.0.0.1", port=shell_port, data_dir=data_dir)
+    server = ShellServer(
+        host="127.0.0.1",
+        port=shell_port,
+        data_dir=data_dir,
+        cms_url=cms_url,
+        available_slots=available_slots,
+    )
     server.start()
     logger.info("Shell server listening on %s", shell_url)
 
