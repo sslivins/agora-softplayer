@@ -3,13 +3,14 @@
 Resolves config (CLI args > env vars > defaults), then runs the softplayer
 event loop:
 
+  * loads fleet/HMAC credentials from a CMS-generated env file
   * starts the FastAPI shell server on 127.0.0.1:<shell-port>
   * launches a Chromium / Edge window pointed at the shell URL
-  * (todo) connects to CMS as a normal device
+  * spins up the agora CMSClient to talk to the CMS as a real device
 
-For milestone 1 the CMS connection is stubbed: we just want to prove the
-window appears with the local shell SPA rendered inside it. That part
-lands in milestone 2.
+There is no built-in CMS URL; the env file is the single source of truth
+for ``AGORA_CMS_URL`` + ``AGORA_FLEET_ID`` + ``AGORA_FLEET_SECRET_HEX``.
+Without those the process refuses to start.
 """
 from __future__ import annotations
 
@@ -23,6 +24,10 @@ import click
 
 from agora_softplayer import __version__
 from agora_softplayer.browser import find_browser, launch_browser
+from agora_softplayer.credentials import (
+    CredentialsError,
+    load_credentials,
+)
 from agora_softplayer.shell_server import ShellServer
 
 logger = logging.getLogger("agora_softplayer")
@@ -40,10 +45,16 @@ def _default_data_dir() -> Path:
 @click.command()
 @click.version_option(__version__, prog_name="agora-softplayer")
 @click.option(
-    "--cms-url",
-    envvar="AGORA_SOFTPLAYER_CMS_URL",
+    "--credentials-file",
+    "credentials_file",
+    envvar="AGORA_SOFTPLAYER_CREDENTIALS_FILE",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="CMS WebSocket base URL (e.g. http://localhost:8000). Required in M2+.",
+    help=(
+        "Path to a softplayer.env file from the CMS imager. If unset, search "
+        "(in order): %LOCALAPPDATA%\\agora-softplayer\\softplayer.env, the "
+        "directory next to the .exe, and the current directory."
+    ),
 )
 @click.option(
     "--data-dir",
@@ -80,7 +91,7 @@ def _default_data_dir() -> Path:
     "-v", "--verbose", is_flag=True, help="Enable debug logging."
 )
 def main(
-    cms_url: str | None,
+    credentials_file: Path | None,
     data_dir: Path | None,
     browser_path: Path | None,
     shell_port: int,
@@ -94,31 +105,53 @@ def main(
         stream=sys.stdout,
     )
 
+    try:
+        credentials = load_credentials(credentials_file)
+    except CredentialsError as exc:
+        click.echo(f"ERROR: {exc}", err=True)
+        if exc.hint:
+            click.echo(f"HINT: {exc.hint}", err=True)
+        sys.exit(2)
+
     data_dir = (data_dir or _default_data_dir()).resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
-    logger.info("agora-softplayer %s starting (data_dir=%s)", __version__, data_dir)
+    logger.info(
+        "agora-softplayer %s starting (data_dir=%s, creds=%s, fleet=%s)",
+        __version__,
+        data_dir,
+        credentials.source_path,
+        credentials.fleet_id,
+    )
 
     # Install the agora shims so any subsequent cms_client / shared.*
-    # import resolves to Windows-friendly stand-ins. Cheap and idempotent;
-    # we do it even in M1-standalone mode so the shim state (data_dir,
-    # available_slots) is always in sync with the CLI flags.
+    # import resolves to Windows-friendly stand-ins.
     from agora_softplayer import shims
     shims.configure(data_dir=data_dir, available_slots=available_slots)
     try:
         shims.apply_shims()
     except ModuleNotFoundError as exc:
-        # Bare scaffold without the agora/ submodule checked out is fine
-        # for M1; we only need shims when we wire CMSClient.
-        logger.warning("agora submodule unavailable, shims not installed: %s", exc)
+        click.echo(
+            "ERROR: the agora/ submodule isn't checked out. "
+            "Run `git submodule update --init --recursive` and retry.",
+            err=True,
+        )
+        logger.debug("shim install failed: %s", exc)
+        sys.exit(2)
 
-    if cms_url:
-        from agora_softplayer.cms_runner import CMSRunner
-        cms_runner = CMSRunner(cms_url=cms_url, data_dir=data_dir)
-        cms_runner.start()
-        logger.info("CMSRunner started against %s", cms_url)
-    else:
-        cms_runner = None
-        logger.warning("No --cms-url provided. M1 standalone mode -- shell SPA only.")
+    from agora_softplayer.cms_runner import CMSRunner
+    cms_runner = CMSRunner(
+        cms_url=credentials.cms_url,
+        data_dir=data_dir,
+        fleet_id=credentials.fleet_id,
+        fleet_secret_hex=credentials.fleet_secret_hex,
+        cms_transport=credentials.cms_transport,
+    )
+    cms_runner.start()
+    logger.info(
+        "CMSRunner started against %s (transport=%s)",
+        credentials.cms_url,
+        credentials.cms_transport,
+    )
 
     browser = browser_path or find_browser()
     if browser is None:
@@ -127,6 +160,7 @@ def main(
             "or pass --browser-path explicitly.",
             err=True,
         )
+        cms_runner.stop()
         sys.exit(2)
     logger.info("Using browser: %s", browser)
 
@@ -135,7 +169,7 @@ def main(
         host="127.0.0.1",
         port=shell_port,
         data_dir=data_dir,
-        cms_url=cms_url,
+        cms_url=credentials.cms_url,
         available_slots=available_slots,
     )
     server.start()
@@ -154,11 +188,10 @@ def main(
             browser_proc.terminate()
         except Exception:
             logger.exception("Failed to terminate browser process")
-        if cms_runner is not None:
-            try:
-                cms_runner.stop()
-            except Exception:
-                logger.exception("Failed to stop CMSRunner")
+        try:
+            cms_runner.stop()
+        except Exception:
+            logger.exception("Failed to stop CMSRunner")
         server.stop()
         sys.exit(0)
 
@@ -168,8 +201,7 @@ def main(
 
     rc = browser_proc.wait()
     logger.info("Browser exited with code %d", rc)
-    if cms_runner is not None:
-        cms_runner.stop()
+    cms_runner.stop()
     server.stop()
 
 
