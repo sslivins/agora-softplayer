@@ -112,8 +112,12 @@ def main(
         logger.warning("agora submodule unavailable, shims not installed: %s", exc)
 
     if cms_url:
-        logger.info("CMS URL configured: %s (M2: not yet wired)", cms_url)
+        from agora_softplayer.cms_runner import CMSRunner
+        cms_runner = CMSRunner(cms_url=cms_url, data_dir=data_dir)
+        cms_runner.start()
+        logger.info("CMSRunner started against %s", cms_url)
     else:
+        cms_runner = None
         logger.warning("No --cms-url provided. M1 standalone mode -- shell SPA only.")
 
     browser = browser_path or find_browser()
@@ -138,21 +142,28 @@ def main(
     )
     logger.info("Browser process PID %d", browser_proc.pid)
 
-    def _shutdown(*_args):  # noqa: ANN001
+    def _shutdown(*_args):
         logger.info("Shutting down")
         try:
             browser_proc.terminate()
         except Exception:
             logger.exception("Failed to terminate browser process")
+        if cms_runner is not None:
+            try:
+                cms_runner.stop()
+            except Exception:
+                logger.exception("Failed to stop CMSRunner")
         server.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     if hasattr(signal, "SIGBREAK"):  # Windows ctrl-break
-        signal.signal(signal.SIGBREAK, _shutdown)  # type: ignore[attr-defined]
+        signal.signal(signal.SIGBREAK, _shutdown)
 
     rc = browser_proc.wait()
     logger.info("Browser exited with code %d", rc)
+    if cms_runner is not None:
+        cms_runner.stop()
     server.stop()
 
 
