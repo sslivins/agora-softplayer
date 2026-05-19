@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agora-softplayer"
+version = "0.1.0"
+description = "Windows-native softplayer for the Agora digital-signage CMS"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "sslivins" }]
+dependencies = [
+    "click>=8.1",
+    # CMS client runtime deps (mirror agora/requirements-cms-client.txt;
+    # the agora/ submodule isn't pip-installable on its own).
+    "websockets>=12",
+    "aiohttp>=3.9",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    # Shell server (matches agora/player/shell/).
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+    "pyinstaller>=6.6",
+]
+
+[project.scripts]
+agora-softplayer = "agora_softplayer.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agora_softplayer = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # line length handled by formatter
