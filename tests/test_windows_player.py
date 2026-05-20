@@ -52,11 +52,27 @@ def _write_desired(data_dir: Path, payload: dict) -> None:
     (state / "desired.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _read_current(data_dir: Path) -> dict | None:
+    path = data_dir / "state" / "current.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _make_player(data_dir: Path) -> tuple[WindowsPlayer, MagicMock]:
     chromium = MagicMock(name="chromium")
     wp = WindowsPlayer(data_dir=data_dir, poll_interval_s=0.05)
     wp.attach_player(chromium)
     return wp, chromium
+
+
+def _wait_for(predicate, timeout_s: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 # ── _resolve_asset ──
@@ -83,15 +99,6 @@ def test_start_without_attach_raises(tmp_path: Path) -> None:
 
 # ── dispatch ──
 
-def _wait_for(predicate, timeout_s: float = 2.0) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.02)
-    return False
-
-
 def test_play_image_dispatches_show_image(tmp_path: Path) -> None:
     _seed_assets(tmp_path)
     wp, chromium = _make_player(tmp_path)
@@ -110,6 +117,27 @@ def test_play_image_dispatches_show_image(tmp_path: Path) -> None:
     )
 
 
+def test_play_image_writes_current_playing(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "hello.jpg",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        assert _wait_for(lambda: _read_current(tmp_path) is not None)
+    finally:
+        wp.stop()
+    current = _read_current(tmp_path)
+    assert current["pipeline_state"] == "PLAYING"
+    assert current["asset"] == "hello.jpg"
+    assert current["mode"] == "play"
+    assert current["started_at"] is not None
+    assert current["error"] is None
+
+
 def test_stop_mode_dispatches_stop_playback(tmp_path: Path) -> None:
     _seed_assets(tmp_path)
     wp, chromium = _make_player(tmp_path)
@@ -120,10 +148,15 @@ def test_stop_mode_dispatches_stop_playback(tmp_path: Path) -> None:
     wp.start()
     try:
         assert _wait_for(lambda: chromium.stop_playback.called)
+        assert _wait_for(lambda: _read_current(tmp_path) is not None)
     finally:
         wp.stop()
     chromium.show_image.assert_not_called()
     chromium.show_video.assert_not_called()
+    current = _read_current(tmp_path)
+    assert current["pipeline_state"] == "READY"
+    assert current["asset"] is None
+    assert current["mode"] == "splash"
 
 
 def test_splash_mode_is_deferred_no_call(tmp_path: Path) -> None:
@@ -135,7 +168,6 @@ def test_splash_mode_is_deferred_no_call(tmp_path: Path) -> None:
     })
     wp.start()
     try:
-        # Give the loop several poll cycles; nothing should fire.
         time.sleep(0.4)
     finally:
         wp.stop()
@@ -143,6 +175,8 @@ def test_splash_mode_is_deferred_no_call(tmp_path: Path) -> None:
     chromium.show_video.assert_not_called()
     chromium.show_splash.assert_not_called()
     chromium.stop_playback.assert_not_called()
+    # No current.json updates because we never transitioned through dispatch.
+    assert _read_current(tmp_path) is None
 
 
 def test_video_is_deferred_in_m3a1(tmp_path: Path) -> None:
@@ -158,7 +192,7 @@ def test_video_is_deferred_in_m3a1(tmp_path: Path) -> None:
         time.sleep(0.4)
     finally:
         wp.stop()
-    # Video rendering lands in M3a-3; M3a-1 only emits a log line.
+    # Video rendering lands in M3a-3; M3a-2 only emits a log line.
     chromium.show_video.assert_not_called()
     chromium.show_image.assert_not_called()
 
@@ -230,8 +264,54 @@ def test_no_desired_file_is_silent(tmp_path: Path) -> None:
 
 # ── on_shell_event ──
 
-def test_on_shell_event_logs_only_in_m3a1(tmp_path: Path, caplog) -> None:
+def test_on_shell_event_ready_is_logged_only(tmp_path: Path, caplog) -> None:
     wp, _ = _make_player(tmp_path)
     with caplog.at_level("DEBUG", logger="agora_softplayer.windows_player"):
         wp.on_shell_event({"event": "ready"})
     assert any("shell event" in r.message for r in caplog.records)
+    # `ready` does not produce a current.json update.
+    assert _read_current(tmp_path) is None
+
+
+def test_on_shell_event_ended_writes_ready_state(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "hello.jpg",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        wp.on_shell_event({"event": "ended", "asset": "/assets/images/hello.jpg"})
+    finally:
+        wp.stop()
+    current = _read_current(tmp_path)
+    assert current is not None
+    assert current["pipeline_state"] == "READY"
+    # asset stays so the dashboard still shows what was last on-screen.
+    assert current["asset"] == "hello.jpg"
+
+
+def test_on_shell_event_error_writes_error_state(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "hello.jpg",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        wp.on_shell_event({
+            "event": "error", "asset": "/assets/images/hello.jpg",
+            "msg": "image load failed",
+        })
+    finally:
+        wp.stop()
+    current = _read_current(tmp_path)
+    assert current is not None
+    assert current["pipeline_state"] == "ERROR"
+    assert current["error"] == "image load failed"
+    assert current["asset"] == "hello.jpg"
+

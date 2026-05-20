@@ -5,16 +5,24 @@ into shell SPA commands by calling ``ChromiumPlayer`` methods. Polls
 because Windows has no inotify; debounces on ``(mtime, content hash)``
 so identical desired states don't re-dispatch.
 
-Scope this milestone (M3a-1): only PLAY mode with image assets.
-``STOP`` -> ``stop_playback``; ``SPLASH`` and video assets are logged but
-not yet rendered. Video and splash land in M3a-3, slideshows in M3b.
+Scope this milestone (M3a-2): PLAY mode with image assets renders, and
+playback transitions are reflected in ``data_dir/state/current.json``
+so CMSClient's heartbeat publishes them up to the CMS dashboard.
+``STOP`` -> ``stop_playback`` + CurrentState reset.  ``SPLASH`` and
+video assets are still log-only; they ship in M3a-3.
+
+Pipeline-state convention (matches Pi values consumed by
+agora-cms/cms/templates/devices.html):
+  * "PLAYING" -- after a successful show_* dispatch
+  * "READY"   -- shell finished a video / asset was stopped
+  * "ERROR"   -- shell reported error or dispatch failed
 """
 from __future__ import annotations
 
 import hashlib
 import logging
 import threading
-import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,7 +46,12 @@ def _resolve_asset(name: str, assets_dir: Path) -> Optional[Path]:
 
 
 class WindowsPlayer:
-    """Poll ``desired.json`` and dispatch into a ``ChromiumPlayer``."""
+    """Poll ``desired.json`` and dispatch into a ``ChromiumPlayer``.
+
+    Also owns the ``current.json`` writer: every transition through this
+    class produces a CurrentState that CMSClient picks up on its next
+    heartbeat.
+    """
 
     def __init__(
         self,
@@ -48,6 +61,7 @@ class WindowsPlayer:
     ) -> None:
         self._data_dir = Path(data_dir)
         self._desired_path = self._data_dir / "state" / "desired.json"
+        self._current_path = self._data_dir / "state" / "current.json"
         self._assets_dir = self._data_dir / "assets"
         self._poll_interval = max(0.05, float(poll_interval_s))
 
@@ -55,6 +69,7 @@ class WindowsPlayer:
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
         self._last_sig: Optional[tuple] = None
+        self._current_asset: Optional[str] = None
 
     # ── Public lifecycle ──
 
@@ -92,11 +107,25 @@ class WindowsPlayer:
     # ── Event sink (shell SPA -> server) ──
 
     def on_shell_event(self, payload: dict) -> None:
-        """Receive shell SPA -> server events.
-
-        M3a-1 only logs them. M3a-2 wires these into ``current.json``.
-        """
+        """Receive shell SPA -> server events and reflect them in current.json."""
         logger.debug("shell event: %s", payload)
+        event = payload.get("event")
+        if event == "ended":
+            # Asset finished playback. Keep mode/asset on CurrentState
+            # so the CMS still shows what was last on-screen, but mark
+            # the pipeline as READY (not PLAYING) so the badge flips.
+            self._write_current(
+                asset=self._current_asset,
+                pipeline_state="READY",
+            )
+        elif event == "error":
+            self._write_current(
+                asset=self._current_asset,
+                pipeline_state="ERROR",
+                error=str(payload.get("msg") or "shell reported error"),
+            )
+        # "ready" is a chatty connect-time event from the SPA; nothing
+        # to reflect in CurrentState.
 
     # ── Internals ──
 
@@ -149,6 +178,8 @@ class WindowsPlayer:
         if desired.mode == PlaybackMode.STOP:
             logger.info("dispatch: STOP")
             self._player.stop_playback()
+            self._current_asset = None
+            self._write_current(asset=None, pipeline_state="READY")
             return
 
         if desired.mode == PlaybackMode.SPLASH:
@@ -171,6 +202,8 @@ class WindowsPlayer:
         if subdir == "images":
             logger.info("dispatch: show_image %s", path)
             self._player.show_image(path)
+            self._current_asset = desired.asset
+            self._write_current(asset=desired.asset, pipeline_state="PLAYING")
         elif subdir == "videos":
             logger.info(
                 "dispatch: show_video (deferred to M3a-3): %s", path
@@ -179,3 +212,43 @@ class WindowsPlayer:
             logger.info(
                 "dispatch: unsupported subdir %r for %s", subdir, path
             )
+
+    def _write_current(
+        self,
+        *,
+        asset: Optional[str],
+        pipeline_state: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Write CurrentState to data_dir/state/current.json (atomic)."""
+        try:
+            from shared.models import CurrentState, PlaybackMode
+            from shared.state import write_state
+        except ImportError:
+            logger.error("shims not installed; cannot write current.json")
+            return
+        # CMS dashboard maps mode + pipeline_state to its status badge:
+        #   pipeline_state=PLAYING -> "Playing"
+        #   pipeline_state=READY   -> "Ready"
+        #   pipeline_state=ERROR   -> "Error"
+        # The mode field stays as PLAY whenever an asset is in play
+        # (matches Pi). After STOP, mode becomes SPLASH (Pi convention
+        # -- there is no STOP equivalent on the dashboard).
+        mode = PlaybackMode.PLAY if asset else PlaybackMode.SPLASH
+        state = CurrentState(
+            mode=mode,
+            asset=asset,
+            pipeline_state=pipeline_state,
+            started_at=datetime.now(timezone.utc) if pipeline_state == "PLAYING" else None,
+            error=error,
+        )
+        try:
+            write_state(self._current_path, state)
+        except OSError as e:
+            logger.warning("failed to write current.json: %s", e)
+        else:
+            logger.debug(
+                "current.json updated: pipeline_state=%s asset=%s error=%s",
+                pipeline_state, asset, error,
+            )
+
