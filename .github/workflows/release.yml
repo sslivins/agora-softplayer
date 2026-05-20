@@ -1,26 +1,22 @@
 name: Release
 
-# Triggered by:
-#   * a push to `main` (the normal path): we look at pyproject.toml's
-#     `project.version`. If `v<X.Y.Z>` does not yet exist as a tag, we
-#     build + publish a new GitHub Release whose tag is created
-#     atomically via `gh release create --target <sha>`. If the version
-#     already has a tag, we exit cleanly (every main push runs this; only
-#     version-bumping merges produce a release).
-#   * a push of a `v*` tag (the recovery path): we build + publish at
-#     that tag. Useful when an earlier release-build failed and we want
-#     to rerun without bumping the version.
+# Auto-releases on merge to main are PAUSED until the .exe signing
+# situation is resolved (issue #9 -- Azure Trusted Signing). The
+# unsigned .exe is blocked by Windows Defender Application Control on
+# Microsoft-managed devices and triggers SmartScreen "unrecognized app"
+# warnings everywhere else, so cutting a new release each merge just
+# accumulates artifacts nobody can run cleanly.
 #
-# Building the release atomically from the workflow means we never have
-# to push a tag from one workflow and rely on a *different* workflow
-# picking it up — pushes by GITHUB_TOKEN don't fire other workflows, so
-# any "tag from auto-tag-workflow -> release-workflow" hand-off silently
-# breaks unless we use a PAT. Doing both jobs in one workflow sidesteps
-# that entirely.
+# To resume auto-on-merge releases later: re-add `branches: [main]` to
+# the trigger below and undo the `should_build=false` override in the
+# `decide` job.
+#
+# To cut a release MANUALLY in the meantime (e.g. for testing the
+# signing pipeline once it lands): push an annotated `v*` tag. The
+# tag-push trigger below still runs the full build+release flow.
 
 on:
   push:
-    branches: [main]
     tags:
       - "v*"
 
@@ -62,29 +58,13 @@ jobs:
             exit 0
           fi
 
-          # main-branch path: read pyproject.toml version and decide.
-          version=$(python3 -c "import tomllib;print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
-          tag="v$version"
-          echo "pyproject version on main: $version (tag would be $tag)"
-
-          init_version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"',open('src/agora_softplayer/__init__.py').read()).group(1))")
-          if [ "$init_version" != "$version" ]; then
-            echo "::error::pyproject.toml ($version) and src/agora_softplayer/__init__.py ($init_version) disagree."
-            echo "Both must be bumped in the same PR. Refusing to release."
-            exit 1
-          fi
-
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "tag $tag already exists -- nothing to do (no version bump in this merge)."
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "tag=$tag"           >> "$GITHUB_OUTPUT"
-            echo "target_sha="        >> "$GITHUB_OUTPUT"
-          else
-            echo "tag $tag does not exist -- will build + release at $GITHUB_SHA"
-            echo "should_build=true"     >> "$GITHUB_OUTPUT"
-            echo "tag=$tag"              >> "$GITHUB_OUTPUT"
-            echo "target_sha=$GITHUB_SHA">> "$GITHUB_OUTPUT"
-          fi
+          # Auto-on-merge path is currently disabled; see the comment at
+          # the top of this file. We keep the job structure intact so
+          # re-enabling is a one-line change in the trigger.
+          echo "Auto-on-merge release is disabled; nothing to do."
+          echo "should_build=false" >> "$GITHUB_OUTPUT"
+          echo "tag="                >> "$GITHUB_OUTPUT"
+          echo "target_sha="         >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.arch }})

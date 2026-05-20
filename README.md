@@ -20,17 +20,31 @@ only Windows-specific code lives in `src/agora_softplayer/`.
 ```powershell
 git clone --recurse-submodules https://github.com/sslivins/agora-softplayer
 cd agora-softplayer
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[dev]"
 
 # Drop a softplayer.env file (downloaded from the CMS imager) next to the
 # project, then run:
-python -m agora_softplayer --credentials-file .\softplayer.env
+python -m agora_softplayer --credentials-file .\softplayer.env --data-dir .\data
 ```
 
 A Chromium window opens. The device shows up as PENDING in the CMS;
 adopt it from the Devices page like you would any other Pi.
+
+> **Already cloned without `--recurse-submodules`?** You'll hit
+> `ERROR: the agora/ submodule isn't checked out`. Run
+> `git submodule update --init --recursive` from the repo root and retry.
+
+> **Why explicit `--credentials-file` / `--data-dir` when running from
+> source?** The implicit search keys off the location of the running
+> `python.exe` (the venv binary), not the repo root. Passing them
+> explicitly avoids surprises. The implicit search is for the
+> `.exe` distribution case below, where the layout is unambiguous.
+
+Both Python 3.12 amd64 and arm64 are supported. PyPI ships precompiled
+`cryptography` wheels for `win_arm64` so installation is a single
+`pip install` on either architecture.
 
 ## Quickstart (binary release)
 
@@ -129,3 +143,96 @@ remains a hardware-side feature.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Troubleshooting
+
+### `ERROR: the agora/ submodule isn't checked out`
+
+You cloned without `--recurse-submodules`. From the repo root:
+
+```powershell
+git submodule update --init --recursive
+```
+
+### `No module named agora_softplayer`
+
+You ran a system Python that doesn't have the project installed. Either
+activate the venv first:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m agora_softplayer ...
+```
+
+Or call the venv's interpreter explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe -m agora_softplayer ...
+```
+
+`where.exe python` should list the venv's `python.exe` first when the
+venv is active.
+
+### `.exe` fails to launch with "Bad Image" / `0xc0e90002`
+
+On Microsoft-managed Windows devices (and some other strictly
+locked-down enterprise machines), Windows Defender Application Control
+(WDAC) enforces a User-Mode Code Integrity policy at "Enterprise
+signing level". The `.exe` is currently unsigned, so on those machines
+the loader rejects the bundled `python312.dll` at startup with the
+"Bad Image" dialog and error status `0xc0e90002`.
+
+You can confirm by looking at the Windows Event Log
+(`Microsoft-Windows-CodeIntegrity/Operational`) — events 3033 and 3077
+will name the rejected DLL and the signing level requirement.
+
+Three workarounds, in order of effort:
+
+1. **Run from source instead.** Python from python.org and the Microsoft
+   Store is signed by `Python Software Foundation`, which corporate
+   WDAC policies allow-list. Follow the developer quickstart above —
+   you'll get the same softplayer, just launched through `python.exe`
+   instead of a frozen `.exe`.
+2. **Run in a Hyper-V VM** on the same laptop. Corporate WDAC scopes to
+   the host, not nested guests. A fresh Windows 11 dev VM (`Hyper-V
+   Manager > Quick Create`) runs the `.exe` without complaint.
+3. **Run on a non-managed device.** A personal Windows machine or the
+   actual target hardware (an agora-style kiosk before it's joined to
+   the org) has no such WDAC policy.
+
+Tracking proper Authenticode signing in
+[#9](https://github.com/sslivins/agora-softplayer/issues/9) (Azure
+Trusted Signing). Once that lands the `.exe` will satisfy SmartScreen
+and most enterprise WDAC policies — though Microsoft-corp-managed
+devices specifically may still reject it, since they typically allow
+only `Microsoft Corporation`-signed binaries.
+
+### SmartScreen prompts "Windows protected your PC"
+
+Expected for unsigned binaries downloaded from the internet. Click
+**More info > Run anyway**. This warning goes away once the binary is
+signed (issue #9).
+
+### Browser doesn't open / wrong browser used
+
+The softplayer auto-detects Chromium, Edge, and Chrome in standard
+install locations. If yours is non-standard, set
+`--browser-path "C:\path\to\chrome.exe"` or the
+`AGORA_SOFTPLAYER_BROWSER` env var.
+
+### Running the source clone from a different folder than the venv
+
+If your softplayer.env and `data/` live in some other directory (e.g.
+a "portable folder" like `C:\Users\me\softplayer\my-fleet\`) and the
+repo + venv are elsewhere, just pass both paths explicitly:
+
+```powershell
+cd C:\Users\me\softplayer\my-fleet
+C:\path\to\agora-softplayer\.venv\Scripts\python.exe `
+  -m agora_softplayer `
+  --credentials-file .\softplayer.env `
+  --data-dir .\data
+```
+
+The implicit `softplayer.env`-next-to-the-exe search only kicks in for
+the frozen `.exe` distribution.
