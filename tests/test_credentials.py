@@ -2,14 +2,14 @@
 
 These cover:
 - happy-path parsing with and without optional keys
-- missing required keys → InvalidCredentialsError
-- malformed hex → InvalidCredentialsError
-- short hex (below the 16-byte HMAC floor) → InvalidCredentialsError
-- malformed env file (no '=' on a non-comment line, bad key chars) → InvalidCredentialsError
+- missing required keys -> InvalidCredentialsError
+- malformed hex -> InvalidCredentialsError
+- short hex (below the 16-byte HMAC floor) -> InvalidCredentialsError
+- malformed env file (no '=' on a non-comment line, bad key chars) -> InvalidCredentialsError
 - comments, blank lines, and quoted values
-- search-order precedence: --credentials-file > LOCALAPPDATA > exe dir > cwd
-- explicit --credentials-file that doesn't exist → MissingCredentialsError
-- nothing found anywhere → MissingCredentialsError
+- search-order precedence: --credentials-file > exe-dir/softplayer.env
+- explicit --credentials-file that doesn't exist -> MissingCredentialsError
+- nothing found anywhere -> MissingCredentialsError
 """
 from __future__ import annotations
 
@@ -167,69 +167,34 @@ def test_invalid_key_characters(tmp_path: Path):
         load_credentials(env_file)
 
 
-def test_implicit_search_local_app_data_wins(tmp_path: Path):
-    """LOCALAPPDATA is first in the implicit search order."""
-    lad = tmp_path / "localappdata"
+def test_implicit_search_picks_up_exe_dir(tmp_path: Path):
+    """softplayer.env next to the .exe is the one and only implicit location."""
     exe = tmp_path / "exe"
-    cwd = tmp_path / "cwd"
-    _write_env(lad / "agora-softplayer" / DEFAULT_FILENAME, _minimum_body("wss://lad/ws/device"))
     _write_env(exe / DEFAULT_FILENAME, _minimum_body("wss://exe/ws/device"))
-    _write_env(cwd / DEFAULT_FILENAME, _minimum_body("wss://cwd/ws/device"))
 
-    creds = load_credentials(
-        None,
-        local_app_data=lad / "agora-softplayer",
-        exe_dir=exe,
-        cwd=cwd,
-    )
-    assert creds.cms_url == "wss://lad/ws/device"
-
-
-def test_implicit_search_falls_through_to_exe_dir(tmp_path: Path):
-    lad = tmp_path / "localappdata" / "agora-softplayer"  # doesn't exist
-    exe = tmp_path / "exe"
-    cwd = tmp_path / "cwd"
-    _write_env(exe / DEFAULT_FILENAME, _minimum_body("wss://exe/ws/device"))
-    _write_env(cwd / DEFAULT_FILENAME, _minimum_body("wss://cwd/ws/device"))
-
-    creds = load_credentials(None, local_app_data=lad, exe_dir=exe, cwd=cwd)
+    creds = load_credentials(None, exe_dir=exe)
     assert creds.cms_url == "wss://exe/ws/device"
-
-
-def test_implicit_search_falls_through_to_cwd(tmp_path: Path):
-    lad = tmp_path / "localappdata" / "agora-softplayer"
-    exe = tmp_path / "exe"  # doesn't exist
-    cwd = tmp_path / "cwd"
-    _write_env(cwd / DEFAULT_FILENAME, _minimum_body("wss://cwd/ws/device"))
-
-    creds = load_credentials(None, local_app_data=lad, exe_dir=exe, cwd=cwd)
-    assert creds.cms_url == "wss://cwd/ws/device"
+    assert creds.source_path == exe / DEFAULT_FILENAME
 
 
 def test_implicit_search_nothing_found(tmp_path: Path):
-    lad = tmp_path / "lad"
-    exe = tmp_path / "exe"
-    cwd = tmp_path / "cwd"
+    exe = tmp_path / "exe"  # empty directory
 
     with pytest.raises(MissingCredentialsError, match="No softplayer.env"):
-        load_credentials(None, local_app_data=lad, exe_dir=exe, cwd=cwd)
+        load_credentials(None, exe_dir=exe)
 
 
 def test_implicit_search_malformed_file_does_not_fall_through(tmp_path: Path):
     """A found-but-broken file is an error, not a hint to try the next path."""
-    lad = tmp_path / "localappdata" / "agora-softplayer"
     exe = tmp_path / "exe"
-    cwd = tmp_path / "cwd"
-    # LOCALAPPDATA file exists but is missing AGORA_CMS_URL.
+    # File exists but is missing AGORA_CMS_URL.
     _write_env(
-        lad / DEFAULT_FILENAME,
+        exe / DEFAULT_FILENAME,
         f"AGORA_FLEET_ID=fleet\nAGORA_FLEET_SECRET_HEX={VALID_HEX}\n",
     )
-    # CWD has a valid file -- but we should never fall through to it.
-    _write_env(cwd / DEFAULT_FILENAME, _minimum_body("wss://cwd/ws/device"))
 
     with pytest.raises(InvalidCredentialsError, match="AGORA_CMS_URL"):
-        load_credentials(None, local_app_data=lad, exe_dir=exe, cwd=cwd)
+        load_credentials(None, exe_dir=exe)
 
 
 def test_credentials_error_carries_hint(tmp_path: Path):
