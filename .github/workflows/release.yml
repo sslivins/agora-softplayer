@@ -1,16 +1,95 @@
 name: Release
 
+# Triggered by:
+#   * a push to `main` (the normal path): we look at pyproject.toml's
+#     `project.version`. If `v<X.Y.Z>` does not yet exist as a tag, we
+#     build + publish a new GitHub Release whose tag is created
+#     atomically via `gh release create --target <sha>`. If the version
+#     already has a tag, we exit cleanly (every main push runs this; only
+#     version-bumping merges produce a release).
+#   * a push of a `v*` tag (the recovery path): we build + publish at
+#     that tag. Useful when an earlier release-build failed and we want
+#     to rerun without bumping the version.
+#
+# Building the release atomically from the workflow means we never have
+# to push a tag from one workflow and rely on a *different* workflow
+# picking it up — pushes by GITHUB_TOKEN don't fire other workflows, so
+# any "tag from auto-tag-workflow -> release-workflow" hand-off silently
+# breaks unless we use a PAT. Doing both jobs in one workflow sidesteps
+# that entirely.
+
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  decide:
+    name: Decide whether to release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      tag:          ${{ steps.plan.outputs.tag }}
+      target_sha:   ${{ steps.plan.outputs.target_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF##*/}"
+            echo "Triggered by tag push: $tag"
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag"          >> "$GITHUB_OUTPUT"
+            # Empty target_sha means `gh release create` uses the tag's commit.
+            echo "target_sha="       >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # main-branch path: read pyproject.toml version and decide.
+          version=$(python3 -c "import tomllib;print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
+          tag="v$version"
+          echo "pyproject version on main: $version (tag would be $tag)"
+
+          init_version=$(python3 -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"',open('src/agora_softplayer/__init__.py').read()).group(1))")
+          if [ "$init_version" != "$version" ]; then
+            echo "::error::pyproject.toml ($version) and src/agora_softplayer/__init__.py ($init_version) disagree."
+            echo "Both must be bumped in the same PR. Refusing to release."
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "tag $tag already exists -- nothing to do (no version bump in this merge)."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$tag"           >> "$GITHUB_OUTPUT"
+            echo "target_sha="        >> "$GITHUB_OUTPUT"
+          else
+            echo "tag $tag does not exist -- will build + release at $GITHUB_SHA"
+            echo "should_build=true"     >> "$GITHUB_OUTPUT"
+            echo "tag=$tag"              >> "$GITHUB_OUTPUT"
+            echo "target_sha=$GITHUB_SHA">> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build (${{ matrix.arch }})
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -83,7 +162,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [decide, build]
+    if: needs.decide.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -100,11 +180,21 @@ jobs:
       - name: Create release + upload assets
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG:        ${{ needs.decide.outputs.tag }}
+          TARGET_SHA: ${{ needs.decide.outputs.target_sha }}
         run: |
-          tag="${GITHUB_REF##*/}"
-          gh release create "$tag" \
+          set -euo pipefail
+          target_args=()
+          if [ -n "${TARGET_SHA}" ]; then
+            target_args=(--target "${TARGET_SHA}")
+            echo "Creating release $TAG at commit $TARGET_SHA (this will also create the tag)"
+          else
+            echo "Creating release $TAG at existing tag"
+          fi
+          gh release create "$TAG" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "$tag" \
+            --title "$TAG" \
             --generate-notes \
+            "${target_args[@]}" \
             dist/agora-softplayer-amd64.exe \
             dist/agora-softplayer-arm64.exe
