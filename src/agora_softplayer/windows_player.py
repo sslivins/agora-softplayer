@@ -22,16 +22,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL_S = 0.25
 
 
-def _resolve_asset(name: str, assets_dir: Path) -> Optional[Path]:
+def _resolve_asset(name: str, assets_dir: Path) -> Path | None:
     """Locate an asset file under ``assets_dir``.
 
     Mirrors ``agora/player/service.py:_resolve_asset`` (same subdir
@@ -45,7 +45,7 @@ def _resolve_asset(name: str, assets_dir: Path) -> Optional[Path]:
     return None
 
 
-def _read_splash_config(persist_dir: Path) -> Optional[str]:
+def _read_splash_config(persist_dir: Path) -> str | None:
     """Return the user-configured splash asset name, or None.
 
     CMSClient writes ``<persist_dir>/splash`` as a plain text file
@@ -83,10 +83,10 @@ class WindowsPlayer:
         self._poll_interval = max(0.05, float(poll_interval_s))
 
         self._player: Any = None  # ChromiumPlayer, set via attach_player
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
-        self._last_sig: Optional[tuple] = None
-        self._current_asset: Optional[str] = None
+        self._last_sig: tuple | None = None
+        self._current_asset: str | None = None
 
     # -- Public lifecycle ----------------------------------------------------
 
@@ -268,10 +268,10 @@ class WindowsPlayer:
     def _write_current(
         self,
         *,
-        asset: Optional[str],
+        asset: str | None,
         pipeline_state: str,
-        error: Optional[str] = None,
-        mode: Optional[str] = None,
+        error: str | None = None,
+        mode: str | None = None,
     ) -> None:
         """Write CurrentState to data_dir/state/current.json (atomic).
 
@@ -294,7 +294,7 @@ class WindowsPlayer:
             mode=mode_enum,
             asset=asset,
             pipeline_state=pipeline_state,
-            started_at=datetime.now(timezone.utc) if pipeline_state == "PLAYING" else None,
+            started_at=datetime.now(UTC) if pipeline_state == "PLAYING" else None,
             error=error,
         )
         try:

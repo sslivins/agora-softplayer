@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -31,7 +30,7 @@ class AuxServer:
         host: str,
         port: int,
         data_dir: Path,
-        cms_url: Optional[str] = None,
+        cms_url: str | None = None,
         available_slots: int = 1,
     ) -> None:
         self.host = host
@@ -40,10 +39,10 @@ class AuxServer:
         self.cms_url = cms_url
         self.available_slots = available_slots
         self._app = self._build_app()
-        self._server: Optional[uvicorn.Server] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: uvicorn.Server | None = None
+        self._thread: threading.Thread | None = None
 
-    def _device_id(self) -> Optional[str]:
+    def _device_id(self) -> str | None:
         path = self.data_dir / "device_id"
         if not path.exists():
             return None

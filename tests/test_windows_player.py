@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from agora_softplayer.windows_player import WindowsPlayer, _resolve_asset
-
 
 pytestmark = pytest.mark.usefixtures("shims_installed")
 
@@ -105,7 +104,7 @@ def test_play_image_dispatches_show_image(tmp_path: Path) -> None:
     _write_desired(tmp_path, {
         "mode": "play",
         "asset": "hello.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -122,7 +121,7 @@ def test_play_image_writes_current_playing(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "play", "asset": "hello.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -143,7 +142,7 @@ def test_stop_mode_dispatches_stop_playback(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "stop",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -165,7 +164,7 @@ def test_splash_mode_with_no_config_is_no_op(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "splash",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -190,7 +189,7 @@ def test_splash_mode_dispatches_show_splash_with_config(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "splash",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -218,7 +217,7 @@ def test_splash_asset_not_on_disk_is_no_op(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "splash",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -237,7 +236,7 @@ def test_play_video_dispatches_show_video(tmp_path: Path) -> None:
         "asset": "clip.mp4",
         "loop": True,
         "loop_count": 3,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -265,7 +264,7 @@ def test_missing_asset_does_not_crash(tmp_path: Path) -> None:
     _write_desired(tmp_path, {
         "mode": "play",
         "asset": "absent.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -278,7 +277,7 @@ def test_missing_asset_does_not_crash(tmp_path: Path) -> None:
 def test_debounce_skips_identical_desired(tmp_path: Path) -> None:
     _seed_assets(tmp_path)
     wp, chromium = _make_player(tmp_path)
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     _write_desired(tmp_path, {"mode": "play", "asset": "hello.jpg", "timestamp": ts})
     wp.start()
     try:
@@ -296,7 +295,7 @@ def test_desired_change_triggers_new_dispatch(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "play", "asset": "hello.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -305,7 +304,7 @@ def test_desired_change_triggers_new_dispatch(tmp_path: Path) -> None:
         time.sleep(0.05)
         _write_desired(tmp_path, {
             "mode": "play", "asset": "second.jpg",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         })
         assert _wait_for(lambda: chromium.show_image.call_count >= 2)
     finally:
@@ -340,7 +339,7 @@ def test_on_shell_event_ended_writes_ready_state(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "play", "asset": "hello.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
@@ -360,7 +359,7 @@ def test_on_shell_event_error_writes_error_state(tmp_path: Path) -> None:
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
         "mode": "play", "asset": "hello.jpg",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     })
     wp.start()
     try:
