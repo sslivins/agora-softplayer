@@ -39,6 +39,29 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Drop Windows OS-shipped runtime DLLs from the bundle. PyInstaller's
+# default behavior on Windows is to pull the Universal C Runtime
+# (`ucrtbase.dll`, `api-ms-win-*.dll`) and `vcruntime*.dll` from the
+# Python install into the bundle, where they get extracted to a temp
+# `_MEI*` directory at startup. On Windows-on-ARM the kernel's stricter
+# Code Integrity rejects the loose, untrusted copy with
+# `STATUS_INVALID_IMAGE_HASH (0xC0E90002)`, so the .exe fails to start
+# with "ucrtbase.dll is either not designed to run on Windows or it
+# contains an error". These DLLs are guaranteed to exist in
+# `C:\Windows\System32` on every supported Windows version, so we
+# excise them from the bundle and let the loader resolve them from the
+# OS at runtime.
+_OS_DLL_PREFIXES = ("ucrtbase", "vcruntime", "api-ms-win-")
+
+
+def _is_os_runtime_dll(name: str) -> bool:
+    lower = name.lower()
+    return any(lower.startswith(p) or ("/" + p) in lower or ("\\" + p) in lower for p in _OS_DLL_PREFIXES)
+
+
+a.binaries = [b for b in a.binaries if not _is_os_runtime_dll(b[0])]
+a.datas    = [d for d in a.datas    if not _is_os_runtime_dll(d[0])]
+
 exe = EXE(
     pyz,
     a.scripts,
