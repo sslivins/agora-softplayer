@@ -23,12 +23,13 @@ from pathlib import Path
 import click
 
 from agora_softplayer import __version__
+from agora_softplayer.aux_server import AuxServer
 from agora_softplayer.browser import find_browser, launch_browser
 from agora_softplayer.credentials import (
     CredentialsError,
     load_credentials,
 )
-from agora_softplayer.shell_server import ShellServer
+from agora_softplayer.windows_player import WindowsPlayer
 
 logger = logging.getLogger("agora_softplayer")
 
@@ -164,16 +165,45 @@ def main(
         sys.exit(2)
     logger.info("Using browser: %s", browser)
 
-    shell_url = f"http://127.0.0.1:{shell_port}/"
-    server = ShellServer(
+    # ChromiumPlayer (vendored from agora/player/chromium_backend.py) owns
+    # the real shell server + WS + /assets mount on shell_port. We run it
+    # with spawn_kiosk=False because we don't want its sway/cage Pi-only
+    # subprocess plumbing; the softplayer launches a Windows browser at
+    # ``chromium.shell_url()`` instead.
+    from player.chromium_backend import ChromiumPlayer
+
+    windows_player = WindowsPlayer(data_dir=data_dir)
+    chromium = ChromiumPlayer(
+        assets_dir=data_dir / "assets",
         host="127.0.0.1",
         port=shell_port,
+        on_event=windows_player.on_shell_event,
+        spawn_kiosk=False,
+    )
+    chromium.start()
+    if not chromium.is_alive():
+        click.echo(
+            "ERROR: ChromiumPlayer shell server failed to come up. "
+            "Check the log for the bind error.",
+            err=True,
+        )
+        cms_runner.stop()
+        sys.exit(2)
+    windows_player.attach_player(chromium)
+    windows_player.start()
+    shell_url = chromium.shell_url()
+    logger.info("Shell server (ChromiumPlayer) listening on %s", shell_url)
+
+    aux_port = shell_port + 1
+    aux = AuxServer(
+        host="127.0.0.1",
+        port=aux_port,
         data_dir=data_dir,
         cms_url=credentials.cms_url,
         available_slots=available_slots,
     )
-    server.start()
-    logger.info("Shell server listening on %s", shell_url)
+    aux.start()
+    logger.info("Aux server listening on http://127.0.0.1:%d", aux_port)
 
     browser_proc = launch_browser(
         browser,
@@ -189,10 +219,21 @@ def main(
         except Exception:
             logger.exception("Failed to terminate browser process")
         try:
+            windows_player.stop()
+        except Exception:
+            logger.exception("Failed to stop WindowsPlayer")
+        try:
+            aux.stop()
+        except Exception:
+            logger.exception("Failed to stop AuxServer")
+        try:
+            chromium.stop()
+        except Exception:
+            logger.exception("Failed to stop ChromiumPlayer")
+        try:
             cms_runner.stop()
         except Exception:
             logger.exception("Failed to stop CMSRunner")
-        server.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -201,8 +242,10 @@ def main(
 
     rc = browser_proc.wait()
     logger.info("Browser exited with code %d", rc)
+    windows_player.stop()
+    aux.stop()
+    chromium.stop()
     cms_runner.stop()
-    server.stop()
 
 
 if __name__ == "__main__":
