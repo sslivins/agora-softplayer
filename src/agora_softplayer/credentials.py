@@ -16,18 +16,18 @@ imager ("Provision Softplayer" tile). Keys mirror the
 The loader searches, in order:
 
 1. The explicit ``--credentials-file PATH`` argument, if provided.
-   Missing/malformed -> hard error (no fallback to the implicit paths).
-2. ``%LOCALAPPDATA%\\agora-softplayer\\softplayer.env``.
-3. The directory containing the running executable (``softplayer.env``).
-4. The current working directory (``softplayer.env``).
+   Missing/malformed -> hard error (no fallback to the implicit path).
+2. ``softplayer.env`` in the directory containing the running executable.
 
-The first existing implicit path wins; if it parses cleanly we use it. If
-it exists but is malformed we error out rather than silently skip to a
-later location.
+The portable layout is the design goal: drop ``softplayer.env`` next to
+the ``.exe``, zip up the whole folder, and it moves between machines as
+a single self-contained unit. There is no machine-wide install path
+(``%LOCALAPPDATA%``) and no environment-variable override -- those
+break portability and make "which creds file is actually live?"
+ambiguous.
 """
 from __future__ import annotations
 
-import os
 import re
 import sys
 from dataclasses import dataclass
@@ -74,48 +74,25 @@ def _exe_dir() -> Path:
     """Directory of the running executable.
 
     For a PyInstaller-frozen build this is the directory containing the
-    ``.exe``. For ``python -m agora_softplayer`` it's the directory of the
-    Python interpreter, which is a reasonable fallback but not very useful;
-    operators running from source should rely on ``%LOCALAPPDATA%`` or the
-    explicit flag instead.
+    ``.exe`` -- the portable install root. For ``python -m
+    agora_softplayer`` it falls back to the directory of the package's
+    ``__main__.py`` (i.e. ``src/agora_softplayer/``), which isn't very
+    useful for picking up creds; source-tree devs should pass
+    ``--credentials-file`` explicitly.
     """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
 
 
-def _local_app_data_dir() -> Path | None:
-    """``%LOCALAPPDATA%\\agora-softplayer``, or ``None`` if unset (non-Windows)."""
-    base = os.environ.get("LOCALAPPDATA")
-    if not base:
-        return None
-    return Path(base) / "agora-softplayer"
+def _implicit_search_paths(*, exe_dir: Path) -> list[Path]:
+    """The implicit (non-flag) credential file search order.
 
-
-def _implicit_search_paths(
-    *,
-    exe_dir: Path | None,
-    local_app_data: Path | None,
-    cwd: Path | None,
-) -> list[Path]:
-    """The implicit (non-flag) credential file search order, with duplicates removed."""
-    paths: list[Path] = []
-    if local_app_data is not None:
-        paths.append(local_app_data / DEFAULT_FILENAME)
-    if exe_dir is not None:
-        paths.append(exe_dir / DEFAULT_FILENAME)
-    if cwd is not None:
-        paths.append(cwd / DEFAULT_FILENAME)
-
-    seen: set[Path] = set()
-    deduped: list[Path] = []
-    for p in paths:
-        resolved = p.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        deduped.append(p)
-    return deduped
+    Only one location: ``softplayer.env`` next to the executable. Kept as
+    a list to leave room for future portable-friendly additions without
+    rewiring callers.
+    """
+    return [exe_dir / DEFAULT_FILENAME]
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -215,14 +192,12 @@ def load_credentials(
     explicit_path: Path | None = None,
     *,
     exe_dir: Path | None = None,
-    local_app_data: Path | None = None,
-    cwd: Path | None = None,
 ) -> Credentials:
     """Resolve, parse, and validate softplayer credentials.
 
-    Parameters are dependency-injection seams for tests; production callers
-    pass only ``explicit_path`` (from the ``--credentials-file`` flag) and
-    let the other paths default to real-system locations.
+    ``exe_dir`` is a dependency-injection seam for tests; production
+    callers pass only ``explicit_path`` (from the ``--credentials-file``
+    flag) and let the search default to the real executable directory.
     """
     if explicit_path is not None:
         path = Path(explicit_path)
@@ -235,8 +210,6 @@ def load_credentials(
 
     search = _implicit_search_paths(
         exe_dir=exe_dir if exe_dir is not None else _exe_dir(),
-        local_app_data=local_app_data if local_app_data is not None else _local_app_data_dir(),
-        cwd=cwd if cwd is not None else Path.cwd(),
     )
 
     for candidate in search:
@@ -250,6 +223,6 @@ def load_credentials(
         hint=(
             "Open the CMS, go to the Imager tab, click \"Provision Softplayer\", "
             "pick a fleet, and download softplayer.env. Drop it next to the .exe "
-            f"or place it at %LOCALAPPDATA%\\agora-softplayer\\{DEFAULT_FILENAME}."
+            "(same folder as agora-softplayer.exe), or pass --credentials-file."
         ),
     )

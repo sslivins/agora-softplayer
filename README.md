@@ -39,8 +39,7 @@ adopt it from the Devices page like you would any other Pi.
 2. In the CMS, go to the **Imager** tab, click **Provision Softplayer**,
    pick the fleet you want this softplayer to join, and download
    `softplayer.env`.
-3. Drop `softplayer.env` next to the `.exe` (or under
-   `%LOCALAPPDATA%\agora-softplayer\softplayer.env`).
+3. Drop `softplayer.env` next to the `.exe`.
 4. Run the `.exe`.
 
 ```powershell
@@ -49,6 +48,21 @@ adopt it from the Devices page like you would any other Pi.
 
 No Python install required, but you do need Microsoft Edge or Google
 Chrome installed for the player window.
+
+**Portable layout.** Everything the softplayer needs lives next to the
+`.exe`:
+
+```
+my-softplayer/
+├── agora-softplayer.exe
+├── softplayer.env        ← from the CMS imager
+└── data/                 ← created on first run; assets, browser profile, state
+```
+
+Zip that folder and it moves between machines as a single self-contained
+unit. There is no machine-wide install path and no environment-variable
+override -- the goal is "drop folder anywhere, double-click .exe, it
+works" with no machine-wide footprint.
 
 ## Credentials
 
@@ -73,19 +87,21 @@ in plaintext on disk.
 Search order (first hit wins):
 
 1. `--credentials-file PATH` (explicit; missing → hard error).
-2. `%LOCALAPPDATA%\agora-softplayer\softplayer.env`.
-3. The directory containing the running `.exe`.
-4. The current working directory.
+2. `softplayer.env` in the same folder as the running `.exe`.
 
 ## Configuration
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--credentials-file PATH` | `AGORA_SOFTPLAYER_CREDENTIALS_FILE` | (search order above) | softplayer.env from the CMS imager |
-| `--data-dir PATH` | `AGORA_SOFTPLAYER_DATA_DIR` | `%APPDATA%\agora-softplayer` | Persistent state (device key, pairing secret, downloaded assets) |
+| `--credentials-file PATH` | _(none)_ | `<exe-dir>\softplayer.env` | softplayer.env from the CMS imager |
+| `--data-dir PATH` | _(none)_ | `<exe-dir>\data` | Persistent state (device key, pairing secret, downloaded assets, browser profile) |
 | `--browser-path PATH` | `AGORA_SOFTPLAYER_BROWSER` | auto-detect | Override for Chromium / Edge / Chrome binary |
 | `--shell-port PORT` | `AGORA_SOFTPLAYER_SHELL_PORT` | `8780` | Local FastAPI shell server port |
 | `--available-slots N` | `AGORA_SOFTPLAYER_AVAILABLE_SLOTS` | `1` | Advertise N HDMI slots to the CMS (use `2` to exercise multi-display) |
+
+`--credentials-file` and `--data-dir` are CLI-only on purpose: they
+control where the install lives, and an env var elsewhere on the
+machine would defeat the portable-folder contract.
 
 ## Architecture
 

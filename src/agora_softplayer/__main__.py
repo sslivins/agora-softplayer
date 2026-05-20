@@ -15,7 +15,6 @@ Without those the process refuses to start.
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import sys
 from pathlib import Path
@@ -34,13 +33,34 @@ from agora_softplayer.windows_player import WindowsPlayer
 logger = logging.getLogger("agora_softplayer")
 
 
+def _exe_dir() -> Path:
+    """Directory of the running executable -- the portable install root.
+
+    For a PyInstaller-frozen build this is the folder containing the
+    ``.exe``, which is what users zip up and move around. For
+    ``python -m agora_softplayer`` it falls back to the directory of
+    the package's ``__main__.py`` (i.e. ``src/agora_softplayer/``),
+    which isn't useful for picking up sibling files; source-tree devs
+    should pass ``--credentials-file`` / ``--data-dir`` explicitly.
+
+    Kept duplicate of ``credentials._exe_dir`` so the two modules
+    don't import from each other for what is fundamentally a small
+    standalone helper.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(sys.argv[0]).resolve().parent if sys.argv and sys.argv[0] else Path.cwd()
+
+
 def _default_data_dir() -> Path:
-    """Per-Windows convention: persistent state under %APPDATA%."""
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "agora-softplayer"
-    # Sensible fallback for non-Windows dev (run under WSL etc).
-    return Path.home() / ".agora-softplayer"
+    """Portable default: ``data/`` next to the executable.
+
+    Zip the install folder and the state moves with it. No
+    ``%APPDATA%``, no environment-variable override -- the goal is
+    "drop folder anywhere, double-click .exe, it works" with no
+    machine-wide footprint.
+    """
+    return _exe_dir() / "data"
 
 
 @click.command()
@@ -48,21 +68,18 @@ def _default_data_dir() -> Path:
 @click.option(
     "--credentials-file",
     "credentials_file",
-    envvar="AGORA_SOFTPLAYER_CREDENTIALS_FILE",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
     help=(
-        "Path to a softplayer.env file from the CMS imager. If unset, search "
-        "(in order): %LOCALAPPDATA%\\agora-softplayer\\softplayer.env, the "
-        "directory next to the .exe, and the current directory."
+        "Path to a softplayer.env file from the CMS imager. If unset, "
+        "look for softplayer.env in the same folder as the .exe."
     ),
 )
 @click.option(
     "--data-dir",
-    envvar="AGORA_SOFTPLAYER_DATA_DIR",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
     default=None,
-    help="Persistent state directory. Defaults to %APPDATA%\\agora-softplayer.",
+    help="Persistent state directory. Defaults to a 'data' folder next to the .exe.",
 )
 @click.option(
     "--browser-path",
