@@ -32,6 +32,29 @@ jobs:
           python-version: "3.12"
           architecture: ${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}
 
+      - name: Install OpenSSL for arm64 (cryptography native build)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          # `cryptography` (a transitive dep) has no precompiled win_arm64
+          # wheel, so pip falls back to a source build that pulls in the
+          # `openssl-sys` Rust crate. That crate needs OpenSSL headers and
+          # libs on disk. Install via vcpkg (preinstalled on the
+          # windows-11-arm runner image) and point openssl-sys at it.
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            $env:VCPKG_INSTALLATION_ROOT = "C:\vcpkg"
+            "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          }
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl:arm64-windows
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openssl:arm64-windows failed" }
+          $installDir = "$env:VCPKG_INSTALLATION_ROOT\installed\arm64-windows"
+          "OPENSSL_DIR=$installDir"              | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          "OPENSSL_LIB_DIR=$installDir\lib"      | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          "OPENSSL_INCLUDE_DIR=$installDir\include" | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          "OPENSSL_NO_VENDOR=1"                  | Out-File -Append -Encoding utf8 -FilePath $env:GITHUB_ENV
+          Write-Output "OpenSSL installed to $installDir"
+          Get-ChildItem "$installDir\lib" | Select-Object -First 10
+
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip
