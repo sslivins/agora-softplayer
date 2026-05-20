@@ -28,11 +28,15 @@ class CMSRunner:
         *,
         cms_url: str,
         data_dir: Path,
+        fleet_id: str,
+        fleet_secret_hex: str,
         cms_transport: str = "direct",
         device_api_key: str = "",
     ) -> None:
         self.cms_url = cms_url
         self.data_dir = data_dir
+        self.fleet_id = fleet_id
+        self.fleet_secret_hex = fleet_secret_hex
         self.cms_transport = cms_transport
         self.device_api_key = device_api_key
 
@@ -86,11 +90,18 @@ class CMSRunner:
         # Defer import: requires shims to be installed first (caller's job).
         from api.config import Settings
 
+        # The softplayer is bootstrap-v2-only by design; there is no legacy
+        # register-then-mint-a-token fallback path on Windows. Settings.bootstrap_v2
+        # together with fleet_id + fleet_secret_hex drives ensure_wps_credentials()
+        # in cms_client.bootstrap_boot.
         return Settings(
             agora_base=self.data_dir,
             cms_url=self.cms_url,
             cms_transport=self.cms_transport,
             device_api_key=self.device_api_key,
+            bootstrap_v2=True,
+            fleet_id=self.fleet_id,
+            fleet_secret_hex=self.fleet_secret_hex,
         )
 
     def _run(self) -> None:
