@@ -159,7 +159,8 @@ def test_stop_mode_dispatches_stop_playback(tmp_path: Path) -> None:
     assert current["mode"] == "splash"
 
 
-def test_splash_mode_is_deferred_no_call(tmp_path: Path) -> None:
+def test_splash_mode_with_no_config_is_no_op(tmp_path: Path) -> None:
+    """SPLASH with no persist/splash file configured does nothing."""
     _seed_assets(tmp_path)
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
@@ -175,16 +176,48 @@ def test_splash_mode_is_deferred_no_call(tmp_path: Path) -> None:
     chromium.show_video.assert_not_called()
     chromium.show_splash.assert_not_called()
     chromium.stop_playback.assert_not_called()
-    # No current.json updates because we never transitioned through dispatch.
+    # No current.json update because we never dispatched.
     assert _read_current(tmp_path) is None
 
 
-def test_video_is_deferred_in_m3a1(tmp_path: Path) -> None:
+def test_splash_mode_dispatches_show_splash_with_config(tmp_path: Path) -> None:
+    """SPLASH with persist/splash naming a present asset -> show_splash."""
     _seed_assets(tmp_path)
+    persist = tmp_path / "persist"
+    persist.mkdir(parents=True, exist_ok=True)
+    (persist / "splash").write_text("default.png", encoding="utf-8")
+
     wp, chromium = _make_player(tmp_path)
     _write_desired(tmp_path, {
-        "mode": "play",
-        "asset": "clip.mp4",
+        "mode": "splash",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_splash.called)
+        assert _wait_for(lambda: _read_current(tmp_path) is not None)
+    finally:
+        wp.stop()
+    chromium.show_splash.assert_called_once_with(
+        tmp_path / "assets" / "splash" / "default.png"
+    )
+    current = _read_current(tmp_path)
+    assert current["mode"] == "splash"
+    assert current["asset"] == "default.png"
+    assert current["pipeline_state"] == "NULL"
+    assert current["started_at"] is None
+
+
+def test_splash_asset_not_on_disk_is_no_op(tmp_path: Path) -> None:
+    """SPLASH config referencing a missing file does nothing (waits)."""
+    _seed_assets(tmp_path)
+    persist = tmp_path / "persist"
+    persist.mkdir(parents=True, exist_ok=True)
+    (persist / "splash").write_text("absent.png", encoding="utf-8")
+
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "splash",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     wp.start()
@@ -192,9 +225,38 @@ def test_video_is_deferred_in_m3a1(tmp_path: Path) -> None:
         time.sleep(0.4)
     finally:
         wp.stop()
-    # Video rendering lands in M3a-3; M3a-2 only emits a log line.
-    chromium.show_video.assert_not_called()
-    chromium.show_image.assert_not_called()
+    chromium.show_splash.assert_not_called()
+    assert _read_current(tmp_path) is None
+
+
+def test_play_video_dispatches_show_video(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play",
+        "asset": "clip.mp4",
+        "loop": True,
+        "loop_count": 3,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_video.called)
+        assert _wait_for(lambda: _read_current(tmp_path) is not None)
+    finally:
+        wp.stop()
+    chromium.show_video.assert_called_once_with(
+        tmp_path / "assets" / "videos" / "clip.mp4",
+        loop=True,
+        muted=False,
+        loop_count=3,
+    )
+    current = _read_current(tmp_path)
+    assert current["mode"] == "play"
+    assert current["asset"] == "clip.mp4"
+    assert current["pipeline_state"] == "PLAYING"
+    assert current["started_at"] is not None
+
 
 
 def test_missing_asset_does_not_crash(tmp_path: Path) -> None:
