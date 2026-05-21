@@ -43,6 +43,14 @@ DEFAULT_SLIDE_DURATION_MS = 10_000
 DEFAULT_TRANSITION = "cut"
 DEFAULT_TRANSITION_MS = 600
 
+# Watchdog timing for video slides played to natural EOF. The shell
+# ``ended`` event is the happy path; the watchdog only fires if the
+# event never arrives (codec hang, shell crash). Mirrors the Pi
+# (``service.py:_PLAY_TO_END_WATCHDOG_HARD_CAP_MS = 300_000`` with a
+# 60s floor when the manifest hints a duration).
+PLAY_TO_END_WATCHDOG_FLOOR_MS = 60_000
+PLAY_TO_END_WATCHDOG_CAP_MS = 300_000
+
 # Indirection point for tests: monkeypatch this with a fake Timer that
 # captures ``(interval, fn, args)`` and exposes a synchronous ``fire()``.
 Timer = threading.Timer
@@ -59,6 +67,11 @@ class _SlideshowState:
     misses_this_cycle: int = 0
     epoch: int = 0
     timer: threading.Timer | None = field(default=None, repr=False)
+    # Set whenever a video slide is dispatched with play_to_end (loop=False
+    # + asset_url available). The shell ``ended`` event with matching
+    # ``asset_url`` advances; the watchdog timer is the fallback.
+    pending_play_to_end: dict | None = field(default=None, repr=False)
+    watchdog: threading.Timer | None = field(default=None, repr=False)
 
 
 def _resolve_asset(name: str, assets_dir: Path) -> Path | None:
@@ -164,6 +177,77 @@ class SlideshowSequencer:
         with self._lock:
             return self._state.digest if self._state else None
 
+    def on_shell_ended(self, asset_url: str | None) -> bool:
+        """Handle a shell ``ended`` event.
+
+        Returns ``True`` iff the event matched an armed play_to_end
+        claim (in which case the slideshow has advanced and the
+        WindowsPlayer should NOT also overwrite ``current.json`` with a
+        READY pipeline_state). Mirrors the Pi's
+        ``_dispatch_chromium_ended_to_slideshow`` (service.py:2488).
+        """
+        if not asset_url:
+            return False
+        advance_epoch: int | None = None
+        with self._lock:
+            if self._state is None:
+                return False
+            pending = self._state.pending_play_to_end
+            if not pending:
+                return False
+            if pending.get("asset_url") != asset_url:
+                logger.debug(
+                    "Slideshow ended ignored: asset mismatch (event=%s armed=%s)",
+                    asset_url, pending.get("asset_url"),
+                )
+                return False
+            logger.info(
+                "Slideshow %s: ended for slide %d (%s) -- advancing",
+                self._state.name,
+                pending["slide_index"],
+                pending["slide_name"],
+            )
+            # Cancel watchdog + clear pending claim so _advance starts
+            # cleanly.
+            if self._state.watchdog is not None:
+                try:
+                    self._state.watchdog.cancel()
+                except Exception:  # pragma: no cover
+                    logger.exception("Watchdog cancel raised")
+                self._state.watchdog = None
+            self._state.pending_play_to_end = None
+            advance_epoch = self._state.epoch
+        if advance_epoch is not None:
+            self._advance(advance_epoch)
+        return True
+
+    def _on_play_to_end_watchdog(self, epoch: int) -> None:
+        """Watchdog callback when a video slide's ``ended`` never arrives.
+
+        Mirrors the Pi's ``_on_play_to_end_chromium_watchdog``
+        (service.py): logs, drops the pending claim, and advances.
+        """
+        advance = False
+        with self._lock:
+            if self._state is None or epoch != self._state.epoch:
+                return
+            self._state.watchdog = None
+            pending = self._state.pending_play_to_end
+            if not pending:
+                return
+            logger.warning(
+                "Slideshow %s: play_to_end watchdog fired for slide %d (%s) "
+                "-- advancing",
+                self._state.name,
+                pending["slide_index"],
+                pending["slide_name"],
+            )
+            self._state.pending_play_to_end = None
+            advance = True
+            advance_epoch = self._state.epoch
+        if advance:
+            self._advance(advance_epoch)
+
     # -- Internals ---------------------------------------------------
 
     def _read_manifest(self, name: str) -> tuple[list[dict], str] | None:
@@ -198,13 +282,18 @@ class SlideshowSequencer:
         return slides, digest
 
     def _cancel_timer_locked(self) -> None:
-        """Cancel any pending slide-advance timer. Caller holds lock."""
-        if self._state and self._state.timer is not None:
-            try:
-                self._state.timer.cancel()
-            except Exception:  # pragma: no cover -- defensive
-                logger.exception("Timer cancel raised")
-            self._state.timer = None
+        """Cancel any pending slide-advance + watchdog timers."""
+        if self._state is None:
+            return
+        for attr in ("timer", "watchdog"):
+            t = getattr(self._state, attr)
+            if t is not None:
+                try:
+                    t.cancel()
+                except Exception:  # pragma: no cover -- defensive
+                    logger.exception("Timer cancel raised")
+                setattr(self._state, attr, None)
+        self._state.pending_play_to_end = None
 
     def _advance(self, epoch: int) -> None:
         """Advance to the next playable slide.
@@ -268,23 +357,115 @@ class SlideshowSequencer:
                     continue
 
                 if asset_type == "video":
-                    # PR-1 deferral: video slides handled in M3b-2.
-                    # Count as a miss so an all-video slideshow aborts
-                    # cleanly rather than spinning silently.
-                    logger.warning(
-                        "Slideshow %s: video slide %s deferred (M3b-2) -- skipping",
-                        s.name, slide_name,
+                    s.misses_this_cycle = 0
+                    transition = slide.get("transition") or DEFAULT_TRANSITION
+                    transition_ms = int(
+                        slide.get("transition_ms") or DEFAULT_TRANSITION_MS
                     )
-                    s.misses_this_cycle += 1
-                    if s.misses_this_cycle >= len(s.slides):
-                        logger.error(
-                            "Slideshow %s: every slide in cycle unplayable -- abort",
+                    duration_ms = int(slide.get("duration_ms") or 0)
+                    play_to_end = bool(slide.get("play_to_end"))
+                    # Resolve the asset URL the shell will echo back in
+                    # ``ended``. ``asset_url`` may not exist on test
+                    # doubles -- treat that as the "no URL" fallback.
+                    asset_url = None
+                    try:
+                        asset_url = self._player.asset_url(path)
+                    except Exception:
+                        logger.debug(
+                            "Slideshow %s: asset_url(%s) raised; using "
+                            "timer-driven fallback", s.name, path,
+                            exc_info=True,
+                        )
+
+                    if play_to_end and asset_url:
+                        # Happy path: shell signals natural EOF.
+                        logger.info(
+                            "Slideshow %s: slide %d/%d video=%s play_to_end "
+                            "asset_url=%s",
+                            s.name, s.index, len(s.slides),
+                            slide_name, asset_url,
+                        )
+                        try:
+                            self._player.show_video(
+                                path, loop=False, muted=False,
+                                transition=transition,
+                                duration_ms=transition_ms,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Slideshow %s: show_video dispatch raised",
+                                s.name,
+                            )
+                        # Watchdog: 2× hinted duration with a 60s floor,
+                        # capped at the hard cap. Matches Pi
+                        # ``_play_slide_to_end_chromium`` (service.py:651).
+                        if duration_ms > 0:
+                            watchdog_ms = max(
+                                duration_ms * 2,
+                                PLAY_TO_END_WATCHDOG_FLOOR_MS,
+                            )
+                        else:
+                            watchdog_ms = PLAY_TO_END_WATCHDOG_CAP_MS
+                        watchdog_ms = min(
+                            watchdog_ms, PLAY_TO_END_WATCHDOG_CAP_MS,
+                        )
+                        s.pending_play_to_end = {
+                            "slide_index": s.index - 1,
+                            "slide_name": slide_name,
+                            "asset_url": asset_url,
+                            "epoch": s.epoch,
+                        }
+                        wd = Timer(
+                            watchdog_ms / 1000.0,
+                            self._on_play_to_end_watchdog,
+                            args=(s.epoch,),
+                        )
+                        wd.daemon = True
+                        s.watchdog = wd
+                        wd.start()
+                        break
+
+                    # Fallback: either ``play_to_end`` is unset OR we
+                    # couldn't compute an asset_url. Loop the video in
+                    # place and advance on the duration timer, exactly
+                    # like the image branch. The Pi takes the same
+                    # path (service.py:629).
+                    if duration_ms <= 0:
+                        duration_ms = DEFAULT_SLIDE_DURATION_MS
+                    if play_to_end and not asset_url:
+                        logger.warning(
+                            "Slideshow %s: video slide %s requested "
+                            "play_to_end but asset_url unavailable -- "
+                            "falling back to timer-driven advance",
+                            s.name, slide_name,
+                        )
+                    else:
+                        logger.info(
+                            "Slideshow %s: slide %d/%d video=%s "
+                            "duration=%dms (loop)",
+                            s.name, s.index, len(s.slides),
+                            slide_name, duration_ms,
+                        )
+                    try:
+                        self._player.show_video(
+                            path, loop=True, muted=False,
+                            transition=transition,
+                            duration_ms=transition_ms,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Slideshow %s: show_video dispatch raised",
                             s.name,
                         )
-                        self._clear_locked()
-                        fire_on_done = True
-                        break
-                    continue
+                    t = Timer(
+                        duration_ms / 1000.0,
+                        self._advance,
+                        args=(s.epoch,),
+                    )
+                    t.daemon = True
+                    s.timer = t
+                    t.start()
+                    break
 
                 # Found an image slide -- dispatch it.
                 s.misses_this_cycle = 0
