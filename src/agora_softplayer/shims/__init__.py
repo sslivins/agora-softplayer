@@ -87,6 +87,13 @@ def apply_shims(agora_root: Path | None = None) -> None:
     cms_service._get_device_id = probes.get_device_id
     cms_service._get_device_type = probes.get_device_type
     cms_service.CMSClient._apply_timezone = lambda self, tz_name: None
+    # Windows has no /etc/agora/version; the real _get_os_version returns
+    # None there, which makes register send `os_version: null` and the
+    # CMS UPDATE crash on a NOT NULL constraint (issue: PENDING revert
+    # bug).  Always report a non-empty Windows-flavored string.
+    import platform as _platform
+    _os_str = f"softplayer-{_platform.system().lower()}-{_platform.release()}"[:32]
+    cms_service.CMSClient._get_os_version = lambda self, _v=_os_str: _v
 
     # Destructive directives become loud no-ops on Windows. The real
     # firmware reboots, runs an apt upgrade, etc -- none of which make
