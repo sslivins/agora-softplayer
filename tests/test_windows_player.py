@@ -376,3 +376,107 @@ def test_on_shell_event_error_writes_error_state(tmp_path: Path) -> None:
     assert current["error"] == "image load failed"
     assert current["asset"] == "hello.jpg"
 
+
+# -- slideshow dispatch --
+
+def _write_slideshow_manifest(data_dir: Path, name: str, slides: list[dict]) -> Path:
+    sdir = data_dir / "assets" / "slideshows"
+    sdir.mkdir(parents=True, exist_ok=True)
+    path = sdir / f"{name}.json"
+    path.write_text(
+        json.dumps({"name": name, "checksum": "x", "slides": slides}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_slideshow_dispatch_starts_sequencer(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        assert _wait_for(lambda: _read_current(tmp_path) is not None)
+    finally:
+        wp.stop()
+    current = _read_current(tmp_path)
+    assert current["asset"] == "show"
+    assert current["pipeline_state"] == "PLAYING"
+
+
+def test_slideshow_missing_manifest_falls_back_to_splash(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    persist = tmp_path / "persist"
+    persist.mkdir(parents=True, exist_ok=True)
+    (persist / "splash").write_text("default.png", encoding="utf-8")
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "nope", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_splash.called)
+    finally:
+        wp.stop()
+    chromium.show_image.assert_not_called()
+
+
+def test_stop_during_slideshow_stops_sequencer(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        assert wp._slideshow is not None and wp._slideshow.is_running()
+        _write_desired(tmp_path, {
+            "mode": "stop",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        assert _wait_for(lambda: chromium.stop_playback.called)
+        assert _wait_for(lambda: not wp._slideshow.is_running())
+    finally:
+        wp.stop()
+
+
+def test_image_dispatch_stops_running_slideshow(tmp_path: Path) -> None:
+    """Switching from slideshow to a single image tears down the sequencer."""
+    _seed_assets(tmp_path)
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        assert wp._slideshow.is_running()
+        chromium.show_image.reset_mock()
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "hello.jpg", "asset_type": "image",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        assert _wait_for(lambda: chromium.show_image.called)
+        assert _wait_for(lambda: not wp._slideshow.is_running())
+    finally:
+        wp.stop()

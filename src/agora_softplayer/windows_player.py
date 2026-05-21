@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agora_softplayer._slideshow import SlideshowSequencer
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL_S = 0.25
@@ -83,6 +85,7 @@ class WindowsPlayer:
         self._poll_interval = max(0.05, float(poll_interval_s))
 
         self._player: Any = None  # ChromiumPlayer, set via attach_player
+        self._slideshow: SlideshowSequencer | None = None
         self._thread: threading.Thread | None = None
         self._stop_evt = threading.Event()
         self._last_sig: tuple | None = None
@@ -93,6 +96,11 @@ class WindowsPlayer:
     def attach_player(self, chromium_player: Any) -> None:
         """Bind the ChromiumPlayer that ``_dispatch`` will drive."""
         self._player = chromium_player
+        self._slideshow = SlideshowSequencer(
+            player=chromium_player,
+            assets_dir=self._assets_dir,
+            on_done=self._on_slideshow_done,
+        )
 
     def start(self) -> None:
         if self._thread:
@@ -194,18 +202,32 @@ class WindowsPlayer:
 
         if desired.mode == PlaybackMode.STOP:
             logger.info("dispatch: STOP")
+            self._stop_slideshow_if_running()
             self._player.stop_playback()
             self._current_asset = None
             self._write_current(asset=None, pipeline_state="READY")
             return
 
         if desired.mode == PlaybackMode.SPLASH:
+            self._stop_slideshow_if_running()
             self._dispatch_splash()
             return
 
         if not desired.asset:
             logger.info("dispatch: PLAY with no asset; ignoring")
             return
+
+        # Slideshow takes precedence over single-asset dispatch -- the
+        # ``asset`` field carries the slideshow name, not an asset
+        # filename, so the regular videos/images lookup would otherwise
+        # 404. Matches the Pi's ``_desired_kind`` classification
+        # (agora/player/service.py:2594).
+        if (getattr(desired, "asset_type", None) or "").lower() == "slideshow":
+            self._dispatch_slideshow(desired)
+            return
+
+        # Single-asset path: tear down any in-flight slideshow first.
+        self._stop_slideshow_if_running()
 
         path = _resolve_asset(desired.asset, self._assets_dir)
         if path is None:
@@ -238,6 +260,50 @@ class WindowsPlayer:
             logger.info(
                 "dispatch: unsupported subdir %r for %s", subdir, path
             )
+
+    def _dispatch_slideshow(self, desired: Any) -> None:
+        """Hand the slideshow ``desired`` state to the sequencer.
+
+        On manifest-missing / parse-failure the sequencer returns False;
+        we record the error in ``current.json`` and fall back to
+        splash so the screen doesn't stay frozen on whatever was
+        previously shown.
+        """
+        if self._slideshow is None:  # pragma: no cover -- guarded by attach_player
+            logger.error("dispatch: slideshow requested but sequencer not attached")
+            return
+        name = desired.asset
+        loop_count = getattr(desired, "loop_count", None)
+        logger.info(
+            "dispatch: slideshow %s (loop_count=%s)", name, loop_count,
+        )
+        ok = self._slideshow.start(name, loop_count)
+        if not ok:
+            logger.info(
+                "dispatch: slideshow %r manifest unavailable; falling back to splash",
+                name,
+            )
+            self._current_asset = None
+            self._write_current(
+                asset=None,
+                pipeline_state="ERROR",
+                error=f"Slideshow not found: {name}",
+            )
+            self._dispatch_splash()
+            return
+        self._current_asset = name
+        self._write_current(asset=name, pipeline_state="PLAYING")
+
+    def _stop_slideshow_if_running(self) -> None:
+        if self._slideshow is not None and self._slideshow.is_running():
+            self._slideshow.stop()
+
+    def _on_slideshow_done(self) -> None:
+        """Callback fired by the sequencer when a slideshow ends naturally
+        or aborts. Transitions to splash so the screen never sits on
+        the last slide."""
+        logger.info("slideshow done; falling back to splash")
+        self._dispatch_splash()
 
     def _dispatch_splash(self) -> None:
         """Resolve and show the configured splash asset.
