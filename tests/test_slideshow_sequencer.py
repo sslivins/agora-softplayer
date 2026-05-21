@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,7 +21,6 @@ from agora_softplayer._slideshow import (
     DEFAULT_TRANSITION_MS,
     SlideshowSequencer,
 )
-
 
 # -- Fake timer infrastructure -------------------------------------------------
 
@@ -36,7 +34,7 @@ class FakeTimer:
     full state machine without sleeps.
     """
 
-    instances: list["FakeTimer"] = []
+    instances: list[FakeTimer] = []
 
     def __init__(self, interval: float, fn, args=(), kwargs=None) -> None:
         self.interval = interval

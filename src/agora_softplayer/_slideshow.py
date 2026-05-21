@@ -27,9 +27,10 @@ import hashlib
 import json
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +53,15 @@ class _SlideshowState:
     name: str
     slides: list[dict]
     digest: str
-    loop_count: Optional[int]
+    loop_count: int | None
     index: int = 0
     loops_completed: int = 0
     misses_this_cycle: int = 0
     epoch: int = 0
-    timer: Optional[threading.Timer] = field(default=None, repr=False)
+    timer: threading.Timer | None = field(default=None, repr=False)
 
 
-def _resolve_asset(name: str, assets_dir: Path) -> Optional[Path]:
+def _resolve_asset(name: str, assets_dir: Path) -> Path | None:
     """Look ``name`` up under ``assets_dir/{videos,images,splash}``.
 
     Matches :func:`agora_softplayer.windows_player._resolve_asset` so
@@ -87,21 +88,21 @@ class SlideshowSequencer:
         *,
         player: Any,
         assets_dir: Path,
-        on_done: Optional[Callable[[], None]] = None,
+        on_done: Callable[[], None] | None = None,
     ) -> None:
         self._player = player
         self._assets_dir = Path(assets_dir)
         self._slideshows_dir = self._assets_dir / "slideshows"
         self._on_done = on_done
         self._lock = threading.Lock()
-        self._state: Optional[_SlideshowState] = None
+        self._state: _SlideshowState | None = None
         # Bumped on every ``start`` and ``stop`` so any in-flight timer
         # callback can tell its slideshow is no longer current.
         self._epoch = 0
 
     # -- Public API --------------------------------------------------
 
-    def start(self, name: str, loop_count: Optional[int]) -> bool:
+    def start(self, name: str, loop_count: int | None) -> bool:
         """Begin sequencing slides from ``<assets>/slideshows/<name>.json``.
 
         Returns ``True`` on success (state initialised, first slide
@@ -149,11 +150,11 @@ class SlideshowSequencer:
         with self._lock:
             return self._state is not None
 
-    def current_name(self) -> Optional[str]:
+    def current_name(self) -> str | None:
         with self._lock:
             return self._state.name if self._state else None
 
-    def manifest_digest(self) -> Optional[str]:
+    def manifest_digest(self) -> str | None:
         """SHA-256 hex of the manifest bytes captured at :meth:`start`.
 
         Exposed for PR-3 (stable-state idempotency) so dispatch can
@@ -165,7 +166,7 @@ class SlideshowSequencer:
 
     # -- Internals ---------------------------------------------------
 
-    def _read_manifest(self, name: str) -> Optional[tuple[list[dict], str]]:
+    def _read_manifest(self, name: str) -> tuple[list[dict], str] | None:
         """Read + validate a slideshow manifest.
 
         Mirrors ``service.py:_read_slideshow_manifest``. Returns
