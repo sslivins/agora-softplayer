@@ -22,6 +22,10 @@ dependencies = [
     # Shell server (matches agora/player/shell/).
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    # IANA tz database — Windows has no system zoneinfo, so without this
+    # `ZoneInfo("America/Los_Angeles")` raises and the schedule evaluator
+    # silently falls back to UTC, never matching local-time windows.
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
