@@ -167,6 +167,16 @@ class SlideshowSequencer:
         with self._lock:
             return self._state.name if self._state else None
 
+    def matches_loop_count(self, loop_count: int | None) -> bool:
+        """Return True iff the running slideshow was started with the
+        same ``loop_count`` value. Used by dispatch idempotency so a
+        CMS re-publish that changed nothing but the loop count still
+        triggers a restart."""
+        with self._lock:
+            if self._state is None:
+                return False
+            return self._state.loop_count == loop_count
+
     def manifest_digest(self) -> str | None:
         """SHA-256 hex of the manifest bytes captured at :meth:`start`.
 
@@ -176,6 +186,26 @@ class SlideshowSequencer:
         """
         with self._lock:
             return self._state.digest if self._state else None
+
+    def manifest_unchanged(self) -> bool:
+        """Return True iff the running slideshow's manifest on disk
+        still matches the digest captured at :meth:`start`.
+
+        Used by :class:`WindowsPlayer._dispatch` to debounce a CMS
+        re-publish of the same slideshow (different ``desired.timestamp``
+        but identical content). On any I/O / parse error returns
+        ``False`` so the caller falls back to a normal restart.
+        """
+        with self._lock:
+            if self._state is None:
+                return False
+            running_name = self._state.name
+            running_digest = self._state.digest
+        manifest = self._read_manifest(running_name)
+        if manifest is None:
+            return False
+        _slides, digest = manifest
+        return digest == running_digest
 
     def on_shell_ended(self, asset_url: str | None) -> bool:
         """Handle a shell ``ended`` event.

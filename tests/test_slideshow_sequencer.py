@@ -626,3 +626,82 @@ def test_manifest_digest_captured_at_start(tmp_path: Path) -> None:
     seq.start("show", loop_count=None)
     digest = seq.manifest_digest()
     assert digest is not None and len(digest) == 64  # SHA-256 hex
+
+
+# -- PR-3: stable-state helpers --
+
+def test_manifest_unchanged_true_for_unmodified_file(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=None)
+    assert seq.manifest_unchanged() is True
+
+
+def test_manifest_unchanged_false_when_file_rewritten(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _seed_image(tmp_path / "assets", "b.jpg")
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=None)
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [
+            {"name": "a.jpg", "asset_type": "image", "duration_ms": 1000},
+            {"name": "b.jpg", "asset_type": "image", "duration_ms": 1000},
+        ],
+    )
+    assert seq.manifest_unchanged() is False
+
+
+def test_manifest_unchanged_false_when_file_deleted(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=None)
+    (tmp_path / "assets" / "slideshows" / "show.json").unlink()
+    assert seq.manifest_unchanged() is False
+
+
+def test_manifest_unchanged_false_when_not_running(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    assert seq.manifest_unchanged() is False
+
+
+def test_matches_loop_count(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=5)
+    assert seq.matches_loop_count(5) is True
+    assert seq.matches_loop_count(None) is False
+    assert seq.matches_loop_count(7) is False
+
+
+def test_matches_loop_count_none(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _write_manifest(
+        tmp_path / "assets", "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=None)
+    assert seq.matches_loop_count(None) is True
+    assert seq.matches_loop_count(1) is False
+
+
+def test_matches_loop_count_false_when_not_running(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    assert seq.matches_loop_count(None) is False

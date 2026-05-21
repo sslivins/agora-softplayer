@@ -480,3 +480,178 @@ def test_image_dispatch_stops_running_slideshow(tmp_path: Path) -> None:
         assert _wait_for(lambda: not wp._slideshow.is_running())
     finally:
         wp.stop()
+
+
+# -- PR-3: stable-state idempotency --
+
+def test_republish_same_slideshow_does_not_restart(tmp_path: Path) -> None:
+    """A CMS re-publish with identical content + fresh timestamp must
+    NOT restart the running slideshow."""
+    _seed_assets(tmp_path)
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        first_call_count = chromium.show_image.call_count
+        epoch_before = wp._slideshow._epoch
+        # Re-publish with NEW timestamp but identical content.
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "show", "asset_type": "slideshow",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        time.sleep(0.3)
+    finally:
+        wp.stop()
+    # No additional dispatches; epoch unchanged.
+    assert chromium.show_image.call_count == first_call_count
+    assert wp._slideshow._epoch == epoch_before
+
+
+def test_republish_with_changed_manifest_restarts(tmp_path: Path) -> None:
+    """A re-publish whose manifest content differs MUST restart."""
+    _seed_assets(tmp_path)
+    (tmp_path / "assets" / "images" / "second.jpg").write_bytes(b"\xff\xd8 b")
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        epoch_before = wp._slideshow._epoch
+        # Manifest content changed -> different digest -> must restart.
+        _write_slideshow_manifest(
+            tmp_path, "show",
+            [
+                {"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000},
+                {"name": "second.jpg", "asset_type": "image", "duration_ms": 5000},
+            ],
+        )
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "show", "asset_type": "slideshow",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        assert _wait_for(lambda: wp._slideshow._epoch > epoch_before)
+    finally:
+        wp.stop()
+
+
+def test_republish_with_changed_loop_count_restarts(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    _write_slideshow_manifest(
+        tmp_path, "show",
+        [{"name": "hello.jpg", "asset_type": "image", "duration_ms": 5000}],
+    )
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "show", "asset_type": "slideshow",
+        "loop_count": 5,
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        epoch_before = wp._slideshow._epoch
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "show", "asset_type": "slideshow",
+            "loop_count": 10,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        assert _wait_for(lambda: wp._slideshow._epoch > epoch_before)
+    finally:
+        wp.stop()
+
+
+def test_republish_same_image_skips_dispatch(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "hello.jpg",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        first_count = chromium.show_image.call_count
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "hello.jpg",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        time.sleep(0.3)
+    finally:
+        wp.stop()
+    assert chromium.show_image.call_count == first_count
+
+
+def test_republish_same_video_skips_dispatch(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "clip.mp4", "loop": True,
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_video.called)
+        first_count = chromium.show_video.call_count
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "clip.mp4", "loop": True,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        time.sleep(0.3)
+    finally:
+        wp.stop()
+    assert chromium.show_video.call_count == first_count
+
+
+def test_switch_image_to_different_image_redispatches(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    (tmp_path / "assets" / "images" / "other.jpg").write_bytes(b"\xff\xd8 o")
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "play", "asset": "hello.jpg",
+        "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.show_image.called)
+        _write_desired(tmp_path, {
+            "mode": "play", "asset": "other.jpg",
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+        assert _wait_for(lambda: chromium.show_image.call_count >= 2)
+    finally:
+        wp.stop()
+    assert chromium.show_image.call_args.args[0].name == "other.jpg"
+
+
+def test_stop_then_stop_skips_second_dispatch(tmp_path: Path) -> None:
+    _seed_assets(tmp_path)
+    wp, chromium = _make_player(tmp_path)
+    _write_desired(tmp_path, {
+        "mode": "stop", "timestamp": datetime.now(UTC).isoformat(),
+    })
+    wp.start()
+    try:
+        assert _wait_for(lambda: chromium.stop_playback.called)
+        first_count = chromium.stop_playback.call_count
+        _write_desired(tmp_path, {
+            "mode": "stop", "timestamp": datetime.now(UTC).isoformat(),
+        })
+        time.sleep(0.3)
+    finally:
+        wp.stop()
+    assert chromium.stop_playback.call_count == first_count
