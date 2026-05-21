@@ -136,6 +136,15 @@ class WindowsPlayer:
         logger.debug("shell event: %s", payload)
         event = payload.get("event")
         if event == "ended":
+            asset_url = payload.get("asset")
+            # Give the slideshow sequencer first crack at the event --
+            # if it matched a play_to_end claim, the sequencer has
+            # already advanced + updated current.json, so DON'T also
+            # write READY here (that would clobber the new PLAYING).
+            if self._slideshow is not None and self._slideshow.on_shell_ended(
+                asset_url,
+            ):
+                return
             # Asset finished playback. Keep mode/asset on CurrentState
             # so the CMS still shows what was last on-screen, but mark
             # the pipeline as READY (not PLAYING) so the badge flips.

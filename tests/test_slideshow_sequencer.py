@@ -8,7 +8,6 @@ on the dispatched calls.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -333,47 +332,211 @@ def test_partial_miss_resets_counter_after_hit(tmp_path: Path) -> None:
     assert seq.is_running()
 
 
-# -- Video deferral (PR-1 only) -----------------------------------------------
+# -- Video dispatch (PR-2) ----------------------------------------------------
 
 
-def test_video_slide_skipped_in_pr1(tmp_path: Path, caplog) -> None:
+def test_video_slide_without_play_to_end_uses_timer_fallback(
+    tmp_path: Path,
+) -> None:
+    """Video without ``play_to_end`` -> loop=True + duration-driven advance."""
     seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = None  # force fallback path
     _seed_image(tmp_path / "assets", "a.jpg")
     _seed_video(tmp_path / "assets", "v.mp4")
     _write_manifest(
         tmp_path / "assets",
         "show",
         [
-            {"name": "v.mp4", "asset_type": "video", "duration_ms": 5000},
+            {"name": "v.mp4", "asset_type": "video", "duration_ms": 3000},
             {"name": "a.jpg", "asset_type": "image", "duration_ms": 1000},
         ],
     )
-    with caplog.at_level(logging.WARNING):
-        seq.start("show", loop_count=1)
-    # Video skipped, image dispatched.
+    seq.start("show", loop_count=None)
+    # Video dispatched with loop=True, NOT skipped.
+    player.show_video.assert_called_once()
+    assert player.show_video.call_args.kwargs["loop"] is True
+    assert FakeTimer.instances[-1].interval == pytest.approx(3.0)
+    # Firing the timer advances to the image slide.
+    FakeTimer.instances[-1].fire()
     player.show_image.assert_called_once()
-    assert player.show_image.call_args.args[0].name == "a.jpg"
-    player.show_video.assert_not_called()
-    assert any("video slide" in r.message and "deferred" in r.message
-               for r in caplog.records)
 
 
-def test_all_video_slideshow_aborts_in_pr1(tmp_path: Path) -> None:
-    done = MagicMock()
-    seq, player = _make_sequencer(tmp_path, on_done=done)
-    _seed_video(tmp_path / "assets", "a.mp4")
-    _seed_video(tmp_path / "assets", "b.mp4")
+def test_video_slide_with_play_to_end_arms_watchdog(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
     _write_manifest(
         tmp_path / "assets",
         "show",
         [
-            {"name": "a.mp4", "asset_type": "video"},
-            {"name": "b.mp4", "asset_type": "video"},
+            {"name": "v.mp4", "asset_type": "video",
+             "duration_ms": 5000, "play_to_end": True},
         ],
     )
     seq.start("show", loop_count=None)
-    player.show_image.assert_not_called()
-    done.assert_called_once()
+    player.show_video.assert_called_once()
+    assert player.show_video.call_args.kwargs["loop"] is False
+    # Watchdog armed: max(5000*2, 60_000) = 60_000 ms = 60 s.
+    assert len(FakeTimer.instances) == 1
+    assert FakeTimer.instances[0].interval == pytest.approx(60.0)
+
+
+def test_play_to_end_watchdog_uses_cap_when_no_duration(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video", "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    # No duration hint -> watchdog at the hard cap (300s).
+    assert FakeTimer.instances[0].interval == pytest.approx(300.0)
+
+
+def test_play_to_end_watchdog_capped_for_huge_duration(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video",
+          "duration_ms": 600_000, "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    # 2 * 600_000 = 1_200_000 ms, capped at 300_000 ms.
+    assert FakeTimer.instances[0].interval == pytest.approx(300.0)
+
+
+def test_on_shell_ended_advances_when_armed(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _seed_image(tmp_path / "assets", "next.jpg")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [
+            {"name": "v.mp4", "asset_type": "video",
+             "duration_ms": 5000, "play_to_end": True},
+            {"name": "next.jpg", "asset_type": "image", "duration_ms": 1000},
+        ],
+    )
+    seq.start("show", loop_count=None)
+    watchdog = FakeTimer.instances[-1]
+    assert seq.on_shell_ended("/assets/videos/v.mp4") is True
+    # Watchdog cancelled, image slide dispatched.
+    assert watchdog.cancelled is True
+    player.show_image.assert_called_once()
+
+
+def test_on_shell_ended_ignores_mismatched_url(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video",
+          "duration_ms": 5000, "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    assert seq.on_shell_ended("/assets/videos/other.mp4") is False
+    # Watchdog still armed.
+    assert FakeTimer.instances[0].cancelled is False
+
+
+def test_on_shell_ended_returns_false_when_no_pending(tmp_path: Path) -> None:
+    """Image slides don't arm pending claims; ``ended`` is a no-op."""
+    seq, _ = _make_sequencer(tmp_path)
+    _seed_image(tmp_path / "assets", "a.jpg")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "a.jpg", "asset_type": "image", "duration_ms": 1000}],
+    )
+    seq.start("show", loop_count=None)
+    assert seq.on_shell_ended("/assets/images/a.jpg") is False
+
+
+def test_on_shell_ended_returns_false_when_not_running(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    assert seq.on_shell_ended("/assets/anything") is False
+
+
+def test_on_shell_ended_returns_false_for_empty_url(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video",
+          "duration_ms": 5000, "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    assert seq.on_shell_ended(None) is False
+    assert seq.on_shell_ended("") is False
+
+
+def test_watchdog_advances_when_ended_never_arrives(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _seed_image(tmp_path / "assets", "next.jpg")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [
+            {"name": "v.mp4", "asset_type": "video",
+             "duration_ms": 5000, "play_to_end": True},
+            {"name": "next.jpg", "asset_type": "image", "duration_ms": 1000},
+        ],
+    )
+    seq.start("show", loop_count=None)
+    watchdog = FakeTimer.instances[-1]
+    watchdog.fire()
+    player.show_image.assert_called_once()
+    # Stale ``ended`` afterward is a no-op (pending was cleared).
+    assert seq.on_shell_ended("/assets/videos/v.mp4") is False
+
+
+def test_play_to_end_with_asset_url_none_falls_back(tmp_path: Path) -> None:
+    """Pi parity: missing asset_url -> loop=True + duration timer."""
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = None
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video",
+          "duration_ms": 3000, "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    player.show_video.assert_called_once()
+    assert player.show_video.call_args.kwargs["loop"] is True
+    # No watchdog -- normal slide-duration timer is in play.
+    assert FakeTimer.instances[0].interval == pytest.approx(3.0)
+
+
+def test_stop_during_video_cancels_watchdog(tmp_path: Path) -> None:
+    seq, player = _make_sequencer(tmp_path)
+    player.asset_url.return_value = "/assets/videos/v.mp4"
+    _seed_video(tmp_path / "assets", "v.mp4")
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "v.mp4", "asset_type": "video",
+          "duration_ms": 5000, "play_to_end": True}],
+    )
+    seq.start("show", loop_count=None)
+    watchdog = FakeTimer.instances[0]
+    seq.stop()
+    assert watchdog.cancelled is True
+    # Stale ``ended`` after stop is a no-op.
+    assert seq.on_shell_ended("/assets/videos/v.mp4") is False
 
 
 # -- Stop semantics -----------------------------------------------------------
