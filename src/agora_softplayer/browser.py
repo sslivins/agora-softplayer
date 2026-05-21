@@ -64,6 +64,11 @@ def launch_browser(
         "--disable-features=TranslateUI",
         "--disable-popup-blocking",
         "--disable-component-update",
+        # Match the Pi player's chromium flags so unmuted videos auto-play.
+        # Without this, Chromium's default autoplay policy blocks playback of
+        # any <video> element with audio and the shell shows only the first
+        # frame.
+        "--autoplay-policy=no-user-gesture-required",
     ]
     logger.debug("Launching: %s", " ".join(argv))
     return subprocess.Popen(argv, close_fds=False)
