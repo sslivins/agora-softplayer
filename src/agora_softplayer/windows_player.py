@@ -90,6 +90,14 @@ class WindowsPlayer:
         self._stop_evt = threading.Event()
         self._last_sig: tuple | None = None
         self._current_asset: str | None = None
+        # Stable-state debounce for single-asset dispatch. CMS
+        # republishes carry a fresh ``desired.timestamp``, so the
+        # file-hash debounce in ``_poll_once`` doesn't catch them and
+        # without this we'd re-fire show_image / show_video on every
+        # WPS sync. Tuple shape: ``(mode, asset_type, asset, loop,
+        # loop_count)``. Slideshow has its own ``manifest_unchanged``
+        # path; this key is bypassed for slideshow dispatches.
+        self._last_dispatch_key: tuple | None = None
 
     # -- Public lifecycle ----------------------------------------------------
 
@@ -210,16 +218,27 @@ class WindowsPlayer:
         from shared.models import PlaybackMode
 
         if desired.mode == PlaybackMode.STOP:
+            if self._last_dispatch_key == ("stop", None, None, False, None):
+                logger.debug("dispatch: STOP already in effect -- skipping")
+                return
             logger.info("dispatch: STOP")
             self._stop_slideshow_if_running()
             self._player.stop_playback()
             self._current_asset = None
             self._write_current(asset=None, pipeline_state="READY")
+            self._last_dispatch_key = ("stop", None, None, False, None)
             return
 
         if desired.mode == PlaybackMode.SPLASH:
+            # Splash dispatch reads persist/splash on every call. The
+            # contents could change without ``desired`` changing, so we
+            # do NOT debounce SPLASH on the dispatch key -- but we DO
+            # tear down a running slideshow first.
             self._stop_slideshow_if_running()
             self._dispatch_splash()
+            self._last_dispatch_key = (
+                "splash", None, self._current_asset, False, None,
+            )
             return
 
         if not desired.asset:
@@ -233,6 +252,13 @@ class WindowsPlayer:
         # (agora/player/service.py:2594).
         if (getattr(desired, "asset_type", None) or "").lower() == "slideshow":
             self._dispatch_slideshow(desired)
+            # Slideshow path manages its own idempotency via the
+            # sequencer; clear the single-asset key so a later switch
+            # back to image/video doesn't false-skip.
+            self._last_dispatch_key = (
+                "play", "slideshow", desired.asset, False,
+                getattr(desired, "loop_count", None),
+            )
             return
 
         # Single-asset path: tear down any in-flight slideshow first.
@@ -247,11 +273,29 @@ class WindowsPlayer:
             return
 
         subdir = path.parent.name
+        asset_type = "image" if subdir == "images" else (
+            "video" if subdir == "videos" else subdir
+        )
+        # Stable-state idempotency: a re-publish with identical content
+        # but a fresh ``timestamp`` would otherwise re-fire show_image
+        # / show_video and cause visible flicker.
+        new_key = (
+            "play", asset_type, desired.asset,
+            bool(desired.loop), desired.loop_count,
+        )
+        if new_key == self._last_dispatch_key:
+            logger.debug(
+                "dispatch: %s %s already playing -- skipping re-dispatch",
+                asset_type, desired.asset,
+            )
+            return
+
         if subdir == "images":
             logger.info("dispatch: show_image %s", path)
             self._player.show_image(path)
             self._current_asset = desired.asset
             self._write_current(asset=desired.asset, pipeline_state="PLAYING")
+            self._last_dispatch_key = new_key
         elif subdir == "videos":
             logger.info(
                 "dispatch: show_video %s (loop=%s, loop_count=%s)",
@@ -265,6 +309,7 @@ class WindowsPlayer:
             )
             self._current_asset = desired.asset
             self._write_current(asset=desired.asset, pipeline_state="PLAYING")
+            self._last_dispatch_key = new_key
         else:
             logger.info(
                 "dispatch: unsupported subdir %r for %s", subdir, path
@@ -283,6 +328,24 @@ class WindowsPlayer:
             return
         name = desired.asset
         loop_count = getattr(desired, "loop_count", None)
+        # Stable-state idempotency: a CMS re-publish gets a fresh
+        # ``desired.timestamp``, so my file-hash debounce in
+        # ``_poll_once`` misses it. Without this short-circuit, every
+        # WPS sync would restart the slideshow at slide 1. Mirrors the
+        # Pi's ``_slideshow_manifest_unchanged`` check
+        # (service.py:2594-2700).
+        if (
+            self._slideshow.is_running()
+            and self._slideshow.current_name() == name
+            and self._slideshow.matches_loop_count(loop_count)
+            and self._slideshow.manifest_unchanged()
+        ):
+            logger.debug(
+                "dispatch: slideshow %s already running with matching "
+                "manifest + loop_count -- skipping restart",
+                name,
+            )
+            return
         logger.info(
             "dispatch: slideshow %s (loop_count=%s)", name, loop_count,
         )
