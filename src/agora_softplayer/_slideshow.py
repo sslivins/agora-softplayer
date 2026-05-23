@@ -23,8 +23,6 @@ Concurrency:
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import threading
 from collections.abc import Callable
@@ -283,32 +281,36 @@ class SlideshowSequencer:
     def _read_manifest(self, name: str) -> tuple[list[dict], str] | None:
         """Read + validate a slideshow manifest.
 
-        Mirrors ``service.py:_read_slideshow_manifest``. Returns
-        ``(slides_list, digest_hex)`` or ``None`` when the manifest is
-        missing, malformed, or has an empty slides list.
+        Delegates to the shared
+        :func:`player.slideshow_engine.read_slideshow_manifest` helper
+        in the vendored ``agora`` submodule so the file-IO + parse +
+        sha256-digest path stays byte-identical to the Pi player.
+        Adds softplayer-specific error logging (the shared helper is
+        silent so callers can surface failures however they want).
+
+        Imported lazily because ``agora_softplayer.shims.apply_shims``
+        is what puts the agora submodule on ``sys.path``, and that
+        happens after this module is first imported.
         """
+        # Lazy import: sys.path is set up either by ``shims.apply_shims()``
+        # in production or by ``tests/conftest.py`` under pytest.
+        from player.slideshow_engine import read_slideshow_manifest
+
         path = self._slideshows_dir / f"{name}.json"
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
-            logger.error("Slideshow manifest missing: %s", path)
+        result = read_slideshow_manifest(self._assets_dir, name)
+        if result is None:
+            # Match the previous log surface: ``_read_manifest`` used
+            # to emit three distinct messages (missing / unreadable /
+            # malformed / no-slides). The shared helper collapses them
+            # all into a single ``None`` return, so we log one generic
+            # error referring to the same path.
+            logger.error(
+                "Slideshow manifest %s missing, malformed, or has no slides",
+                path,
+            )
             return None
-        except OSError as e:
-            logger.error("Slideshow manifest unreadable: %s (%s)", path, e)
-            return None
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            logger.error("Slideshow manifest malformed: %s (%s)", path, e)
-            return None
-        if not isinstance(data, dict):
-            logger.error("Slideshow manifest not a JSON object: %s", path)
-            return None
-        slides = data.get("slides")
-        if not isinstance(slides, list) or not slides:
-            logger.error("Slideshow manifest has no slides: %s", path)
-            return None
-        digest = hashlib.sha256(raw).hexdigest()
+        data, digest = result
+        slides = data["slides"]
         return slides, digest
 
     def _cancel_timer_locked(self) -> None:
