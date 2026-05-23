@@ -1,4 +1,4 @@
 [submodule "agora"]
 	path = agora
 	url = https://github.com/sslivins/agora.git
-	branch = feat/chromium-player
+	branch = main
