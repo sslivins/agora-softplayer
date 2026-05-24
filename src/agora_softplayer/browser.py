@@ -69,6 +69,9 @@ def launch_browser(
         # any <video> element with audio and the shell shows only the first
         # frame.
         "--autoplay-policy=no-user-gesture-required",
+        # Fixed 720p window so the softplayer shell renders at a known
+        # aspect ratio regardless of the host's default browser geometry.
+        "--window-size=1280,720",
     ]
     logger.debug("Launching: %s", " ".join(argv))
     return subprocess.Popen(argv, close_fds=False)
