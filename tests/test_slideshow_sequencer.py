@@ -708,6 +708,71 @@ def test_matches_loop_count_false_when_not_running(tmp_path: Path) -> None:
     assert seq.matches_loop_count(None) is False
 
 
+# -- schedule-derived anchor kwarg (agora#244 follow-up) ---------------------
+
+
+def test_schedule_anchor_kwarg_overrides_manifest_started_at(tmp_path: Path) -> None:
+    """When ``start(anchor=...)`` is supplied, it takes precedence over
+    the manifest's ``started_at`` -- the new wire path from cms_client's
+    ``DesiredState.schedule_anchor_at``."""
+    seq, player = _make_sequencer(tmp_path)
+    for n in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        _seed_image(tmp_path / "assets", n)
+    from datetime import datetime, timedelta
+    # Manifest carries a stale anchor 5s in (would land on slide 0).
+    stale_started_at = (
+        datetime.now(UTC) - timedelta(seconds=5)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    _write_anchored_manifest(
+        tmp_path / "assets", "show",
+        [
+            {"name": "a.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "b.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "c.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "d.jpg", "asset_type": "image", "duration_ms": 10_000},
+        ],
+        started_at=stale_started_at,
+    )
+    # Schedule-derived anchor 25s in (lands on c.jpg, idx=2). If the
+    # manifest started_at were used instead we'd see a.jpg.
+    schedule_anchor = datetime.now(UTC) - timedelta(seconds=25)
+    assert seq.start("show", loop_count=None, anchor=schedule_anchor) is True
+    player.show_image.assert_called_once()
+    assert player.show_image.call_args.args[0].name == "c.jpg"
+
+
+def test_matches_anchor(tmp_path: Path) -> None:
+    """``matches_anchor`` distinguishes anchor differences so dispatch
+    idempotency restarts on a schedule.start_time edit."""
+    seq, _ = _make_sequencer(tmp_path)
+    for n in ("a.jpg", "b.jpg"):
+        _seed_image(tmp_path / "assets", n)
+    from datetime import datetime, timedelta
+    _write_anchored_manifest(
+        tmp_path / "assets", "show",
+        [
+            {"name": "a.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "b.jpg", "asset_type": "image", "duration_ms": 10_000},
+        ],
+        started_at=(datetime.now(UTC) - timedelta(seconds=1)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3] + "Z",
+    )
+    anchor_a = datetime(2026, 5, 24, 13, 0, 0, tzinfo=UTC)
+    anchor_b = datetime(2026, 5, 24, 13, 2, 0, tzinfo=UTC)
+    seq.start("show", loop_count=None, anchor=anchor_a)
+    assert seq.matches_anchor(anchor_a) is True
+    assert seq.matches_anchor(anchor_b) is False
+    assert seq.matches_anchor(None) is False
+
+
+def test_matches_anchor_false_when_not_running(tmp_path: Path) -> None:
+    seq, _ = _make_sequencer(tmp_path)
+    from datetime import datetime
+    assert seq.matches_anchor(None) is False
+    assert seq.matches_anchor(datetime(2026, 5, 24, tzinfo=UTC)) is False
+
+
 # -- Wall-clock anchored resume (agora#226 Phase 2 port) -----------------------
 
 
