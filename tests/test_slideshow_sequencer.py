@@ -705,3 +705,136 @@ def test_matches_loop_count_none(tmp_path: Path) -> None:
 def test_matches_loop_count_false_when_not_running(tmp_path: Path) -> None:
     seq, _ = _make_sequencer(tmp_path)
     assert seq.matches_loop_count(None) is False
+
+
+# -- Wall-clock anchored resume (agora#226 Phase 2 port) -----------------------
+
+
+def _write_anchored_manifest(
+    assets_dir: Path, name: str, slides: list[dict], started_at: str,
+) -> Path:
+    """Like ``_write_manifest`` but emits a schema 1.1 manifest with
+    a ``started_at`` so the sequencer turns on the anchored path."""
+    sdir = assets_dir / "slideshows"
+    sdir.mkdir(parents=True, exist_ok=True)
+    path = sdir / f"{name}.json"
+    path.write_text(
+        json.dumps({
+            "name": name,
+            "checksum": "x",
+            "manifest_schema_version": "1.1",
+            "started_at": started_at,
+            "slides": slides,
+        }),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_anchored_start_resumes_mid_cycle(tmp_path: Path) -> None:
+    """A schema 1.1 manifest with ``started_at`` 25s in the past should
+    dispatch the slide that should be on screen at 25s into the cycle
+    (slide index 2 -- 10s + 10s + 5s in), NOT slide 0."""
+    seq, player = _make_sequencer(tmp_path)
+    for n in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
+        _seed_image(tmp_path / "assets", n)
+    # 10s + 10s + 10s + 10s = 40s cycle. Anchor 25s ago -> target idx=2.
+    from datetime import datetime, timedelta, timezone
+    started_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=25)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    _write_anchored_manifest(
+        tmp_path / "assets",
+        "show",
+        [
+            {"name": "a.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "b.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "c.jpg", "asset_type": "image", "duration_ms": 10_000},
+            {"name": "d.jpg", "asset_type": "image", "duration_ms": 10_000},
+        ],
+        started_at=started_at,
+    )
+    assert seq.start("show", loop_count=None) is True
+    # Anchored path picked target idx=2 (slide c.jpg) instead of 0.
+    player.show_image.assert_called_once()
+    assert player.show_image.call_args.args[0].name == "c.jpg"
+    # Timer armed at min(remaining_ms, RESYNC_CAP_MS=5s). Remaining is
+    # ~5s into a 10s slide, so timer should be at most 5s (the cap).
+    assert FakeTimer.instances[-1].interval <= 5.01
+
+
+def test_legacy_manifest_starts_at_slide_zero(tmp_path: Path) -> None:
+    """Schema 1.0 manifest (no ``started_at``) keeps legacy behaviour:
+    always start at slide 0 regardless of wall clock."""
+    seq, player = _make_sequencer(tmp_path)
+    for n in ("a.jpg", "b.jpg"):
+        _seed_image(tmp_path / "assets", n)
+    _write_manifest(
+        tmp_path / "assets",
+        "show",
+        [
+            {"name": "a.jpg", "asset_type": "image", "duration_ms": 5000},
+            {"name": "b.jpg", "asset_type": "image", "duration_ms": 5000},
+        ],
+    )
+    assert seq.start("show", loop_count=None) is True
+    player.show_image.assert_called_once()
+    assert player.show_image.call_args.args[0].name == "a.jpg"
+    # Legacy path uses the slide's full duration_ms, not capped.
+    assert FakeTimer.instances[-1].interval == pytest.approx(5.0)
+
+
+def test_anchored_resync_tick_does_not_redispatch_same_slide(tmp_path: Path) -> None:
+    """If a resync tick fires while the wall clock still says we're on
+    the slide we already dispatched, we must re-arm the timer WITHOUT
+    re-calling show_image / show_video (which would visibly reload the
+    video element)."""
+    seq, player = _make_sequencer(tmp_path)
+    _seed_video(tmp_path / "assets", "a.mp4")
+    from datetime import datetime, timedelta, timezone
+    # 30s-long single-slide cycle, started 2s ago -> 28s remaining,
+    # capped to 5s by RESYNC_CAP. Looped video (no play_to_end) so the
+    # slide stays the same across resync ticks.
+    started_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=2)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    _write_anchored_manifest(
+        tmp_path / "assets",
+        "show",
+        [{"name": "a.mp4", "asset_type": "video", "duration_ms": 30_000}],
+        started_at=started_at,
+    )
+    assert seq.start("show", loop_count=None) is True
+    assert player.show_video.call_count == 1
+    # Fire the resync timer -- wall clock has barely moved, still slide 0.
+    FakeTimer.instances[-1].fire()
+    assert player.show_video.call_count == 1, (
+        "Resync tick should not have re-dispatched the same video slide"
+    )
+
+
+def test_anchored_video_passes_start_offset_ms(tmp_path: Path) -> None:
+    """A video slide dispatched under the anchored path must include
+    ``start_offset_ms`` so the shell can seek into the asset."""
+    seq, player = _make_sequencer(tmp_path)
+    _seed_video(tmp_path / "assets", "a.mp4")
+    from datetime import datetime, timedelta, timezone
+    # 60s video, 25s elapsed -> start_offset_ms = 25_000.
+    started_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=25)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    _write_anchored_manifest(
+        tmp_path / "assets",
+        "show",
+        [{
+            "name": "a.mp4", "asset_type": "video",
+            "duration_ms": 60_000, "play_to_end": True,
+        }],
+        started_at=started_at,
+    )
+    # Set player.asset_url so play_to_end is taken.
+    player.asset_url.return_value = "/assets/videos/a.mp4"
+    assert seq.start("show", loop_count=None) is True
+    player.show_video.assert_called_once()
+    offset = player.show_video.call_args.kwargs.get("start_offset_ms")
+    assert offset is not None and 24_000 <= offset <= 26_000, offset
