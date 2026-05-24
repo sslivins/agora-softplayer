@@ -8,6 +8,7 @@ on the dispatched calls.
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -739,9 +740,9 @@ def test_anchored_start_resumes_mid_cycle(tmp_path: Path) -> None:
     for n in ("a.jpg", "b.jpg", "c.jpg", "d.jpg"):
         _seed_image(tmp_path / "assets", n)
     # 10s + 10s + 10s + 10s = 40s cycle. Anchor 25s ago -> target idx=2.
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     started_at = (
-        datetime.now(timezone.utc) - timedelta(seconds=25)
+        datetime.now(UTC) - timedelta(seconds=25)
     ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     _write_anchored_manifest(
         tmp_path / "assets",
@@ -791,12 +792,12 @@ def test_anchored_resync_tick_does_not_redispatch_same_slide(tmp_path: Path) -> 
     video element)."""
     seq, player = _make_sequencer(tmp_path)
     _seed_video(tmp_path / "assets", "a.mp4")
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     # 30s-long single-slide cycle, started 2s ago -> 28s remaining,
     # capped to 5s by RESYNC_CAP. Looped video (no play_to_end) so the
     # slide stays the same across resync ticks.
     started_at = (
-        datetime.now(timezone.utc) - timedelta(seconds=2)
+        datetime.now(UTC) - timedelta(seconds=2)
     ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     _write_anchored_manifest(
         tmp_path / "assets",
@@ -818,10 +819,10 @@ def test_anchored_video_passes_start_offset_ms(tmp_path: Path) -> None:
     ``start_offset_ms`` so the shell can seek into the asset."""
     seq, player = _make_sequencer(tmp_path)
     _seed_video(tmp_path / "assets", "a.mp4")
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     # 60s video, 25s elapsed -> start_offset_ms = 25_000.
     started_at = (
-        datetime.now(timezone.utc) - timedelta(seconds=25)
+        datetime.now(UTC) - timedelta(seconds=25)
     ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     _write_anchored_manifest(
         tmp_path / "assets",
