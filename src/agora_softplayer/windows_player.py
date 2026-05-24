@@ -328,28 +328,34 @@ class WindowsPlayer:
             return
         name = desired.asset
         loop_count = getattr(desired, "loop_count", None)
+        anchor = getattr(desired, "schedule_anchor_at", None)
         # Stable-state idempotency: a CMS re-publish gets a fresh
         # ``desired.timestamp``, so my file-hash debounce in
         # ``_poll_once`` misses it. Without this short-circuit, every
         # WPS sync would restart the slideshow at slide 1. Mirrors the
         # Pi's ``_slideshow_manifest_unchanged`` check
-        # (service.py:2594-2700).
+        # (service.py:2594-2700). ``matches_anchor`` is the
+        # schedule-derived analogue: a schedule.start_time edit shifts
+        # the anchor, which must trigger a restart so the cycle
+        # re-aligns to the new wall-clock origin.
         if (
             self._slideshow.is_running()
             and self._slideshow.current_name() == name
             and self._slideshow.matches_loop_count(loop_count)
+            and self._slideshow.matches_anchor(anchor)
             and self._slideshow.manifest_unchanged()
         ):
             logger.debug(
                 "dispatch: slideshow %s already running with matching "
-                "manifest + loop_count -- skipping restart",
+                "manifest + loop_count + anchor -- skipping restart",
                 name,
             )
             return
         logger.info(
-            "dispatch: slideshow %s (loop_count=%s)", name, loop_count,
+            "dispatch: slideshow %s (loop_count=%s anchor=%s)",
+            name, loop_count, anchor.isoformat() if anchor else "<none>",
         )
-        ok = self._slideshow.start(name, loop_count)
+        ok = self._slideshow.start(name, loop_count, anchor=anchor)
         if not ok:
             logger.info(
                 "dispatch: slideshow %r manifest unavailable; falling back to splash",

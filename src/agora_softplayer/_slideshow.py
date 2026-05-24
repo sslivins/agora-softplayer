@@ -149,22 +149,38 @@ class SlideshowSequencer:
 
     # -- Public API --------------------------------------------------
 
-    def start(self, name: str, loop_count: int | None) -> bool:
+    def start(
+        self,
+        name: str,
+        loop_count: int | None,
+        anchor: datetime | None = None,
+    ) -> bool:
         """Begin sequencing slides from ``<assets>/slideshows/<name>.json``.
 
         Returns ``True`` on success (state initialised, first slide
         dispatched or pending). Returns ``False`` when the manifest is
         missing or malformed -- caller is responsible for falling back
         to splash + writing a ``current.json`` error.
+
+        ``anchor`` is the wall-clock instant when the *current* schedule
+        occurrence began. When supplied (typically from
+        ``DesiredState.schedule_anchor_at`` which cms_client derives
+        from the winning schedule's ``start_time``), it overrides the
+        manifest's ``started_at`` field. This decouples slideshow
+        playback from the CMS-side manifest emit time and keeps
+        multi-display venues in sync to a meaningful wall-clock anchor.
         """
         manifest = self._read_manifest(name)
         if manifest is None:
             return False
         data, digest = manifest
         slides = data["slides"]
-        # Wall-clock anchor (agora#226 Phase 2 port). Only meaningful
-        # when the manifest is schema 1.1+ AND carries a parseable
-        # ``started_at``. Anything else leaves ``anchor`` as None and
+        # Wall-clock anchor (agora#226 Phase 2 port; schedule-derived
+        # extension via ``anchor`` kwarg). Preferred source is the
+        # caller-supplied ``anchor`` (== ``desired.schedule_anchor_at``
+        # on Pi). Fall back to the manifest's ``started_at`` field for
+        # ad-hoc / FETCH_REQUEST paths that don't carry a schedule
+        # context. Anything else leaves ``anchor`` as None and
         # ``_advance`` falls back to the legacy relative-timer path.
         # Lazy import so the shims path is set up first (see
         # ``_read_manifest`` for the same pattern).
@@ -173,9 +189,14 @@ class SlideshowSequencer:
             parse_schema_version,
         )
         schema_version = str(data.get("manifest_schema_version") or "1.0")
-        anchor_dt = parse_iso8601_utc(data.get("started_at") or "")
-        if anchor_dt is not None and parse_schema_version(schema_version) < (1, 1):
-            anchor_dt = None
+        if anchor is not None:
+            anchor_dt = anchor
+            anchor_source = "schedule"
+        else:
+            anchor_dt = parse_iso8601_utc(data.get("started_at") or "")
+            if anchor_dt is not None and parse_schema_version(schema_version) < (1, 1):
+                anchor_dt = None
+            anchor_source = "manifest" if anchor_dt else "none"
         cycle_duration_ms = sum(
             max(int(s.get("duration_ms") or 0), 0) for s in slides
         )
@@ -195,8 +216,9 @@ class SlideshowSequencer:
             epoch_started = self._epoch
         logger.info(
             "Slideshow start: name=%s slides=%d loop_count=%s epoch=%d "
-            "digest=%s anchor=%s",
+            "digest=%s anchor_source=%s anchor=%s",
             name, len(slides), loop_count, epoch_started, digest[:8],
+            anchor_source,
             anchor_dt.isoformat() if anchor_dt else "<none>",
         )
         # Kick the first slide. ``_advance`` re-acquires the lock; we
@@ -233,6 +255,19 @@ class SlideshowSequencer:
             if self._state is None:
                 return False
             return self._state.loop_count == loop_count
+
+    def matches_anchor(self, anchor: datetime | None) -> bool:
+        """Return True iff the running slideshow was started with the
+        same wall-clock ``anchor``. Used by dispatch idempotency so a
+        schedule edit that shifts ``start_time`` (and therefore the
+        derived anchor) triggers a restart rather than being absorbed
+        by the unchanged-manifest short-circuit. ``None`` matches
+        ``None`` -- a slideshow started without an anchor remains
+        equivalent to a re-publish that also lacks one."""
+        with self._lock:
+            if self._state is None:
+                return False
+            return self._state.anchor == anchor
 
     def manifest_digest(self) -> str | None:
         """SHA-256 hex of the manifest bytes captured at :meth:`start`.
